@@ -28,6 +28,7 @@ from .android import (
 from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
 from .config import Config
 from .notes import find_notes, gather_init_info, load_notes, notes_exist, INIT_PROMPT
+from .skills import load_skills, select_skills, format_skill_context, list_skills_display, Skill
 from .review import (
     collect_material, split_material_by_file, build_review_messages,
     build_merge_messages, needs_split, REVIEW_SYSTEM,
@@ -125,6 +126,9 @@ HELP = """Commands:
   /review [target]     review changes (uncommitted, staged, branch, files)
   /test-gen <class>    generate unit tests for a Kotlin class
   /doc <target>        add KDoc to Kotlin declarations (class, file, folder)
+  /skills              list available skills
+  /skill <name>        pin a skill (stays active until /skill off)
+  /skill off           unpin the current skill
   /notes               show project notes file
   /map [query]         show the repo map
   /tokens              estimate context usage
@@ -149,6 +153,8 @@ class Coder:
         self.android_info = detect_android(self.root, cfg.android)
         if self.android_info is not None and not cfg.compile_enabled:
             cfg.compile_enabled = "on"
+        self.skills = load_skills(self.root)
+        self._pinned_skill: Optional[Skill] = None
 
     # ---- files -------------------------------------------------------------------
 
@@ -237,6 +243,14 @@ class Coder:
 
     # ---- prompt assembly ------------------------------------------------------------
 
+    def _get_active_skills(self, query: str) -> List[Skill]:
+        """Return skills to inject: pinned skill, or auto-selected from message."""
+        if self._pinned_skill is not None:
+            return [self._pinned_skill]
+        if self.skills:
+            return select_skills(self.skills, query)
+        return []
+
     def _context_messages(self, query: str) -> List[dict]:
         msgs = []
         if self.cfg.notes_enabled:
@@ -247,6 +261,15 @@ class Coder:
                     {"role": "user", "content": "Project notes from the developer. Follow them:\n\n" + notes_text},
                     {"role": "assistant", "content": "Ok, I'll follow these project notes."},
                 ]
+        active_skills = self._get_active_skills(query)
+        for skill in active_skills:
+            skill_text = format_skill_context(skill, self.cfg.skill_chars)
+            msgs += [
+                {"role": "user", "content": "Follow these skill instructions:\n\n" + skill_text},
+                {"role": "assistant", "content": f"Ok, I'll follow the {skill.name} skill instructions."},
+            ]
+            if self._pinned_skill is None:
+                console.print(f"[dim]Skill: {skill.name}[/dim]")
         if self.repo_map is not None:
             self.repo_map.build()
             in_chat = set(self.editable) | set(self.read_only)
@@ -303,6 +326,10 @@ class Coder:
             _, notes_text = load_notes(self.root, self.cfg.notes_file, self.cfg.notes_chars, warn_once=False)
             if notes_text:
                 parts.append(("project notes", len(notes_text)))
+        active_skills = self._get_active_skills("")
+        for skill in active_skills:
+            skill_text = format_skill_context(skill, self.cfg.skill_chars)
+            parts.append((f"skill: {skill.name}", len(skill_text)))
         if self.repo_map is not None:
             parts.append(("repo map", len(msgs[1]["content"])))
         for f in list(self.editable) + list(self.read_only):
@@ -1344,6 +1371,8 @@ def main(
         notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars)
         if notes_path:
             console.print(f"[dim]Project notes: {notes_path.name} ({len(notes_text):,} chars)[/dim]")
+    if coder.skills:
+        console.print(f"[dim]Skills: {len(coder.skills)} loaded[/dim]")
     if coder.repo_map is not None:
         with console.status("[dim]indexing repo map...[/dim]"):
             total, _ = coder.repo_map.build()
@@ -1488,6 +1517,19 @@ def main(
                         console.print("[yellow]Usage: /doc <class|file|folder> [--update][/yellow]")
             elif cmd == "/review":
                 coder.review(arg)
+            elif cmd == "/skills":
+                console.print(list_skills_display(coder.skills))
+            elif cmd == "/skill":
+                if not arg or arg == "off":
+                    coder._pinned_skill = None
+                    console.print("[dim]Skill unpinned.[/dim]")
+                else:
+                    match = [s for s in coder.skills if s.name == arg]
+                    if match:
+                        coder._pinned_skill = match[0]
+                        console.print(f"[dim]Skill pinned: {match[0].name}[/dim]")
+                    else:
+                        console.print(f"[yellow]No skill named '{arg}'. Use /skills to list.[/yellow]")
             elif cmd == "/notes":
                 if cfg.notes_enabled:
                     notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars, warn_once=False)

@@ -155,6 +155,31 @@ etc.). Notes are included in every request.
     AGENT_NOTES_FILE=path   # override the default file search
     AGENT_NOTES_CHARS=3000  # max chars of notes included in context
 
+## Skills
+Skills are reusable instruction sets that live in your project at
+`.agent/skills/<name>/SKILL.md`. Each SKILL.md has front matter:
+
+    ---
+    name: kotlin-style
+    description: Kotlin coding conventions
+    triggers:
+      - kotlin
+      - style
+      - convention
+    ---
+    Your markdown instructions here.
+
+Skills are loaded at startup in both `agent` and `coder`. For each user
+message, the top 1–2 skills whose trigger/description words match are
+auto-selected and injected as context (the model doesn't choose skills).
+
+    /skills              list loaded skills
+    /skill <name>        pin a skill (stays active until /skill off)
+    /skill off           unpin the current skill
+    /tokens              shows skill size in the context budget
+
+    AGENT_SKILL_CHARS=3000  # max chars per skill (default 3000)
+
 ## Code review
 Review code changes with a structured checklist. Works in both coder and agent.
 
