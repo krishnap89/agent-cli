@@ -43,6 +43,7 @@ class Config:
     notes_enabled: bool = os.getenv("AGENT_NOTES", "1") not in ("0", "false")
     notes_file: str = os.getenv("AGENT_NOTES_FILE", "")
     notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))
+    skill_chars: int = int(os.getenv("AGENT_SKILL_CHARS", "3000"))
     debug: bool = os.getenv("AGENT_DEBUG", "") not in ("", "0", "false")
     workdir: Path = field(default_factory=Path.cwd)
     auto_approve: bool = False

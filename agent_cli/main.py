@@ -10,6 +10,7 @@ from .input_reader import read_message
 from .llm import list_models
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
 from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file
+from .skills import load_skills, select_skills, format_skill_context, list_skills_display
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -61,9 +62,28 @@ def main(
         return
 
     agent = Agent(cfg, chat_only=chat_only)
+    skills = load_skills(cfg.workdir)
+    pinned_skill = None  # type: ignore
+
+    def _augment_with_skills(text: str) -> str:
+        """Append skill context to the user message for the agent."""
+        nonlocal pinned_skill
+        if pinned_skill is not None:
+            active = [pinned_skill]
+        else:
+            active = select_skills(skills, text) if skills else []
+        if not active:
+            return text
+        parts = [text]
+        for skill in active:
+            skill_text = format_skill_context(skill, cfg.skill_chars)
+            parts.append("\n\n" + skill_text)
+            if pinned_skill is None:
+                console.print(f"[dim]Skill: {skill.name}[/dim]")
+        return "".join(parts)
 
     if prompt:
-        agent.ask(prompt)
+        agent.ask(_augment_with_skills(prompt))
         return
 
     console.print(f"[bold]agent[/bold] · {cfg.model} @ {cfg.base_url} · {cfg.workdir}")
@@ -71,9 +91,11 @@ def main(
         notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars)
         if notes_path:
             console.print(f"[dim]Project notes: {notes_path.name} ({len(notes_text):,} chars)[/dim]")
+    if skills:
+        console.print(f"[dim]Skills: {len(skills)} loaded[/dim]")
     console.print(f"[dim]Mode: {agent.mode_name}. "
                   "/chat = chat only, /agent = use tools, /review [target] = code review, "
-                  "/map [query] = repo map, /notes = show notes, "
+                  "/map [query] = repo map, /notes = show notes, /skills = list skills, "
                   "/clear = reset, /exit = quit.\n"
                   '""" starts/ends a multi-line message; pastes are kept together.[/dim]\n')
     while True:
@@ -99,6 +121,22 @@ def main(
             target = text[7:].strip()
             _do_review(cfg, target)
             continue
+        if text == "/skills":
+            console.print(list_skills_display(skills))
+            continue
+        if text.startswith("/skill ") or text == "/skill":
+            arg = text[7:].strip() if text.startswith("/skill ") else ""
+            if not arg or arg == "off":
+                pinned_skill = None
+                console.print("[dim]Skill unpinned.[/dim]")
+            else:
+                match = [s for s in skills if s.name == arg]
+                if match:
+                    pinned_skill = match[0]
+                    console.print(f"[dim]Skill pinned: {match[0].name}[/dim]")
+                else:
+                    console.print(f"[yellow]No skill named '{arg}'. Use /skills to list.[/yellow]")
+            continue
         if text == "/notes":
             if cfg.notes_enabled:
                 notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars, warn_once=False)
@@ -117,7 +155,7 @@ def main(
             console.print("[dim]History cleared.[/dim]")
             continue
         try:
-            agent.ask(text)
+            agent.ask(_augment_with_skills(text))
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
         console.print()
