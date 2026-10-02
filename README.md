@@ -28,6 +28,8 @@ Env: AGENT_BASE_URL, AGENT_MODEL, AGENT_API_KEY, AGENT_MAX_TOKENS,
 AGENT_TEMPERATURE, AGENT_TIMEOUT, AGENT_MAX_TURNS,
 AGENT_DEBUG=1 (print raw server responses), AGENT_STREAM (default 1),
 AGENT_RETRIES (default 3, retries 429/502/503/504).
+See sections below for AGENT_LINT_*, AGENT_TEST_*, AGENT_NOTES_*, and
+AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
 
 ## How tool calling works without server support
 1. System prompt lists tools and the <tool_call>{json}</tool_call> format.
@@ -58,8 +60,56 @@ repo map and settings:
 - If the model names a repo file that isn't in the chat, coder offers to add
   it and re-send your request.
 - /undo, /diff, /run <cmd> (optionally share output), /tokens, /map, /clear, /reset.
+- /lint runs syntax checks; /test runs AGENT_TEST_CMD; /autotest on|off toggles auto-test after edits.
+- /review [target] reviews code changes (see below).
+- /notes shows the project notes file.
 - AGENT_CONTEXT_CHARS (default 48000, ~12k tokens): oldest history is dropped
   to stay under it, and you're warned if the files alone are too big.
+
+## Automatic checks after edits
+After applying edits, coder runs built-in lint (Python syntax, JSON validity)
+and optionally a custom lint command and tests. Errors are fed back to the
+model for automatic fixing (up to AGENT_MAX_FIX_ATTEMPTS rounds, default 2).
+
+    AGENT_LINT=1            # enable/disable built-in lint (default: on)
+    AGENT_LINT_CMD="ruff check {files}"  # custom lint; {files} is replaced
+    AGENT_TEST_CMD="python -m pytest"    # test command for /test and auto-test
+    AGENT_AUTO_TEST=1       # run tests after every edit (default: off)
+    AGENT_TEST_TIMEOUT=600  # seconds before test command is killed
+    AGENT_CHECK_OUTPUT_CHARS=4000  # max chars of check output sent to model
+    AGENT_MAX_FIX_ATTEMPTS=2      # auto-fix rounds for lint/test failures
+
+## Project notes
+Create an AGENT.md (or CONVENTIONS.md, .agent/notes.md) in your project root
+to give the model persistent instructions (coding style, architecture notes,
+etc.). Notes are included in every request.
+
+    agent --init-notes      # generate AGENT.md from your codebase
+    coder --init-notes
+    /notes                  # show the current notes in the REPL
+
+    AGENT_NOTES=1           # enable/disable (default: on)
+    AGENT_NOTES_FILE=path   # override the default file search
+    AGENT_NOTES_CHARS=3000  # max chars of notes included in context
+
+## Code review
+Review code changes with a structured checklist. Works in both coder and agent.
+
+    /review                 # uncommitted changes (git diff HEAD + untracked)
+    /review staged          # staged changes (git diff --cached)
+    /review main            # changes vs a branch (git diff main...HEAD)
+    /review app.py utils.py # specific files (no git needed); globs ok
+    coder --review          # one-shot from command line
+    coder --review staged
+    agent --review main
+
+Reviews check for: correctness, edge cases, error handling, security, resource
+leaks, performance, readability, and test coverage. Output is a numbered list
+of findings with severity, location, problem, and fix suggestion. Large diffs
+are split per file and findings merged automatically.
+
+After a review, coder offers to add the reviewed files so you can follow up
+with "fix 1 and 3" in code mode.
 
 ## Repo map
 Both commands index the codebase into a ranked outline (files, classes,
