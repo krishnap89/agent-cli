@@ -23,6 +23,10 @@ from .agent import THINK_RE, show
 from .checks import builtin_lint, custom_lint, run_tests, truncate_output
 from .config import Config
 from .notes import find_notes, gather_init_info, load_notes, notes_exist, INIT_PROMPT
+from .review import (
+    collect_material, split_material_by_file, build_review_messages,
+    build_merge_messages, needs_split, REVIEW_SYSTEM,
+)
 from .editblock import EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
 from .input_reader import read_message
 from .llm import LLMError, chat, list_models
@@ -103,6 +107,7 @@ HELP = """Commands:
   /lint [files]        run lint on files (default: all editable files)
   /test                run AGENT_TEST_CMD and show results
   /autotest on|off     toggle auto-test after edits
+  /review [target]     review changes (uncommitted, staged, branch, files)
   /notes               show project notes file
   /map [query]         show the repo map
   /tokens              estimate context usage
@@ -551,6 +556,69 @@ class Coder:
         passed, output = run_tests(self.root, self.cfg.test_cmd, self.cfg.test_timeout)
         return None if passed else output
 
+    # ---- review --------------------------------------------------------------------------
+
+    def review(self, target: str = "") -> None:
+        """Run a code review. Always uses ask mode; restores mode afterwards."""
+        try:
+            material, files, desc = collect_material(self.root, target)
+        except ValueError as e:
+            console.print(f"[yellow]{e}[/yellow]")
+            return
+
+        budget = self.cfg.context_chars
+        split = needs_split(material, budget)
+        mat_size = len(material)
+        console.print(f"[dim]Reviewing {desc}: {mat_size:,} chars"
+                       f"{', split per file' if split else ''}[/dim]")
+
+        if split:
+            review_text = self._review_split(material, desc)
+        else:
+            review_text = self._review_single(material, desc)
+
+        if review_text is None:
+            return
+
+        show(review_text)
+
+        self.history.append({"role": "user", "content": f"Review of {desc}"})
+        self.history.append({"role": "assistant", "content": review_text})
+
+        not_in_chat = [f for f in files
+                       if f not in self.editable and f not in self.read_only]
+        if not_in_chat:
+            console.print(f"\n[cyan]Reviewed files not in chat: {', '.join(not_in_chat[:10])}[/cyan]")
+            if Confirm.ask("Add them so you can ask for fixes?", default=True):
+                self.add(not_in_chat[:10])
+
+    def _review_single(self, material: str, desc: str) -> Optional[str]:
+        """Send one review request."""
+        messages = build_review_messages(material, desc)
+        return self._call_model(messages)
+
+    def _review_split(self, material: str, desc: str) -> Optional[str]:
+        """Review per file, then merge."""
+        chunks = split_material_by_file(material)
+        if not chunks:
+            return self._review_single(material, desc)
+
+        findings = []  # type: List[str]
+        for i, (fname, chunk) in enumerate(chunks):
+            console.print(f"[dim]  [{i + 1}/{len(chunks)}] {fname}[/dim]")
+            messages = build_review_messages(chunk, fname)
+            text = self._call_model(messages)
+            if text is None:
+                return None
+            findings.append(f"## {fname}\n{text}")
+
+        if len(findings) == 1:
+            return findings[0]
+
+        console.print("[dim]  Merging findings...[/dim]")
+        merge_msgs = build_merge_messages(findings)
+        return self._call_model(merge_msgs)
+
     # ---- commands -------------------------------------------------------------------------
 
     def undo(self) -> None:
@@ -612,6 +680,7 @@ def main(
     base_url: Optional[str] = typer.Option(None, "--base-url", "-u"),
     workdir: Path = typer.Option(Path.cwd(), "--dir", "-d"),
     init_notes: bool = typer.Option(False, "--init-notes", help="Generate AGENT.md project notes."),
+    review: Optional[str] = typer.Option(None, "--review", help="Review changes and exit. Targets: staged, <branch>, <file>."),
 ):
     cfg = Config(workdir=workdir.resolve(), auto_approve=yes)
     if model:
@@ -627,6 +696,10 @@ def main(
         coder.add(files)
     if read:
         coder.add(read, read_only=True)
+
+    if review is not None:
+        coder.review(review)
+        return
 
     if message:
         coder.send(message)
@@ -719,6 +792,8 @@ def main(
                 else:
                     state = "on" if coder.cfg.auto_test else "off"
                     console.print(f"[dim]Auto-test: {state}. Usage: /autotest on|off[/dim]")
+            elif cmd == "/review":
+                coder.review(arg)
             elif cmd == "/notes":
                 if cfg.notes_enabled:
                     notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars, warn_once=False)

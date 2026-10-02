@@ -9,6 +9,7 @@ from .config import Config
 from .input_reader import read_message
 from .llm import list_models
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
+from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -25,6 +26,7 @@ def main(
     chat_only: bool = typer.Option(False, "--chat", "-c", help="Chat only: no tools, no file access."),
     show_map: Optional[str] = typer.Option(None, "--map", help='Print the repo map and exit. Use --map "" or --map "query".'),
     init_notes: bool = typer.Option(False, "--init-notes", help="Generate AGENT.md project notes."),
+    review: Optional[str] = typer.Option(None, "--review", help="Review changes and exit."),
 ):
     cfg = Config(workdir=workdir.resolve(), auto_approve=yes)
     if model:
@@ -54,6 +56,10 @@ def main(
         _do_init_notes(cfg)
         return
 
+    if review is not None:
+        _do_review(cfg, review)
+        return
+
     agent = Agent(cfg, chat_only=chat_only)
 
     if prompt:
@@ -66,7 +72,8 @@ def main(
         if notes_path:
             console.print(f"[dim]Project notes: {notes_path.name} ({len(notes_text):,} chars)[/dim]")
     console.print(f"[dim]Mode: {agent.mode_name}. "
-                  "/chat = chat only, /agent = use tools, /map [query] = repo map, /notes = show notes, "
+                  "/chat = chat only, /agent = use tools, /review [target] = code review, "
+                  "/map [query] = repo map, /notes = show notes, "
                   "/clear = reset, /exit = quit.\n"
                   '""" starts/ends a multi-line message; pastes are kept together.[/dim]\n')
     while True:
@@ -87,6 +94,10 @@ def main(
             query = text[4:].strip()
             console.print(agent.tools.ensure_map().render(query=query, budget=cfg.map_chars),
                           markup=False, highlight=False)
+            continue
+        if text.startswith("/review"):
+            target = text[7:].strip()
+            _do_review(cfg, target)
             continue
         if text == "/notes":
             if cfg.notes_enabled:
@@ -110,6 +121,55 @@ def main(
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
         console.print()
+
+
+def _do_review(cfg: Config, target: str) -> None:
+    """Run a code review using the model."""
+    from .agent import show, THINK_RE
+    try:
+        material, files, desc = collect_material(cfg.workdir, target)
+    except ValueError as e:
+        console.print(f"[yellow]{e}[/yellow]")
+        return
+
+    split = needs_split(material, cfg.context_chars)
+    console.print(f"[dim]Reviewing {desc}: {len(material):,} chars"
+                   f"{', split per file' if split else ''}[/dim]")
+
+    from .llm import chat as llm_chat, LLMError
+
+    def _call(messages):
+        # type: (list) -> Optional[str]
+        try:
+            with console.status("[dim]waiting for model...[/dim]"):
+                reply = llm_chat(cfg, messages)
+        except LLMError as e:
+            console.print(f"[red]{e}[/red]")
+            return None
+        return THINK_RE.sub("", reply.content).strip()
+
+    if split:
+        chunks = split_material_by_file(material)
+        findings = []  # type: List[str]
+        for i, (fname, chunk) in enumerate(chunks):
+            console.print(f"[dim]  [{i + 1}/{len(chunks)}] {fname}[/dim]")
+            msgs = build_review_messages(chunk, fname)
+            text = _call(msgs)
+            if text is None:
+                return
+            findings.append(f"## {fname}\n{text}")
+        if len(findings) > 1:
+            console.print("[dim]  Merging findings...[/dim]")
+            merge_msgs = build_merge_messages(findings)
+            review_text = _call(merge_msgs)
+        else:
+            review_text = findings[0] if findings else None
+    else:
+        msgs = build_review_messages(material, desc)
+        review_text = _call(msgs)
+
+    if review_text:
+        show(review_text)
 
 
 def _do_init_notes(cfg: Config) -> None:
