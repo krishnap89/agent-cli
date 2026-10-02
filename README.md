@@ -174,6 +174,32 @@ are split per file and findings merged automatically.
 After a review, coder offers to add the reviewed files so you can follow up
 with "fix 1 and 3" in code mode.
 
+## Test generation (`/test-gen`)
+Generate JVM unit tests for a Kotlin class that compile, run, and follow your
+project's existing test style. Requires an Android/Gradle project.
+
+    /test-gen LoginViewModel                class by simple name
+    /test-gen com.example.LoginViewModel    class by fully qualified name
+    /test-gen app/src/main/.../Foo.kt       file path
+    /test-gen LoginViewModel login          only tests for the method `login`
+    coder --test-gen "LoginViewModel"       one-shot from command line
+    coder -y --test-gen "LoginViewModel"    auto-accept plan
+
+Steps: resolve the target, detect test libraries from Gradle files, classify the
+class (ViewModel, Repository, UseCase, Plain), show a test plan for approval,
+write tests with SEARCH/REPLACE blocks, compile, run, and report. Production code
+is never changed. One `/undo` reverts everything.
+
+Unsupported: DAO (needs instrumented tests), Activity/Fragment/Composable (needs
+UI tests). Detected libraries include JUnit 4/5, MockK, Mockito-Kotlin,
+coroutines-test, Turbine, Truth, assertk, Robolectric, and arch-testing.
+
+    AGENT_TESTGEN_EXAMPLES=2            existing test files used as style examples
+    AGENT_TESTGEN_MAX_FIX=3             compile + test fix rounds
+    AGENT_TESTGEN_METHODS_PER_STEP=4    methods per generation batch
+    AGENT_TESTGEN_PLAN=1                ask to approve the plan (0 = auto-accept)
+    AGENT_TESTGEN_ALLOW_GRADLE_EDIT=0   allow adding missing test dependencies
+
 ## Repo map
 Both commands index the codebase into a ranked outline (files, classes,
 functions, line numbers). See it with `agent --map "query"` or /map in either

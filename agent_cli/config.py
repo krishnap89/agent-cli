@@ -31,6 +31,11 @@ class Config:
     compile_timeout: int = int(os.getenv("AGENT_COMPILE_TIMEOUT", "600"))
     gradle_args: str = os.getenv("AGENT_GRADLE_ARGS", "--offline --console=plain -q")
     ktlint_mode: str = os.getenv("AGENT_KTLINT", "syntax")  # syntax|full|off
+    testgen_examples: int = int(os.getenv("AGENT_TESTGEN_EXAMPLES", "2"))
+    testgen_max_fix: int = int(os.getenv("AGENT_TESTGEN_MAX_FIX", "3"))
+    testgen_methods_per_step: int = int(os.getenv("AGENT_TESTGEN_METHODS_PER_STEP", "4"))
+    testgen_plan: bool = os.getenv("AGENT_TESTGEN_PLAN", "1") not in ("0", "false")
+    testgen_allow_gradle_edit: bool = os.getenv("AGENT_TESTGEN_ALLOW_GRADLE_EDIT", "0") not in ("0", "false")
     notes_enabled: bool = os.getenv("AGENT_NOTES", "1") not in ("0", "false")
     notes_file: str = os.getenv("AGENT_NOTES_FILE", "")
     notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))

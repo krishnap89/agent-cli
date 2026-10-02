@@ -36,6 +36,14 @@ from .editblock import EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_bl
 from .input_reader import read_message
 from .llm import LLMError, chat, list_models
 from .repomap import RepoMap
+from .testgen import (
+    resolve_target, detect_test_setup, classify_class, check_required_libs,
+    has_suspend_funs, has_flow_or_viewmodelscope, has_constructor_deps,
+    collect_context, find_test_examples, find_test_helpers, test_file_path,
+    build_plan_prompt, build_write_prompt, compile_test_task, run_test_task,
+    find_junit_xml, parse_junit_xml, format_report, parse_bug_classifications,
+    _package_from_file, KIND_RULES,
+)
 
 console = Console()
 
@@ -115,6 +123,7 @@ HELP = """Commands:
   /compile [all]       run Gradle compile check on modules of files in chat
   /modules             list detected modules and file-to-module mapping
   /review [target]     review changes (uncommitted, staged, branch, files)
+  /test-gen <class>    generate unit tests for a Kotlin class
   /notes               show project notes file
   /map [query]         show the repo map
   /tokens              estimate context usage
@@ -732,6 +741,312 @@ class Coder:
         merge_msgs = build_merge_messages(findings)
         return self._call_model(merge_msgs)
 
+    # ---- test-gen --------------------------------------------------------------------------
+
+    def test_gen(self, target: str, method: str = "", auto_accept: bool = False) -> None:
+        """Generate unit tests for a Kotlin class."""
+        if self.android_info is None:
+            console.print("[yellow]No Android/Gradle project detected.[/yellow]")
+            return
+        modules = self.android_info["modules"]
+
+        # Build repo map if needed
+        repo_map_files = {}  # type: Dict[str, Any]
+        if self.repo_map is not None:
+            self.repo_map.build()
+            repo_map_files = self.repo_map.files
+
+        # Step 1: Resolve
+        try:
+            rel, class_name, method, mod = resolve_target(
+                self.root, target, method, repo_map_files, modules,
+            )
+        except ValueError as e:
+            console.print(f"[yellow]{e}[/yellow]")
+            return
+
+        mod_info = modules.get(mod, {})
+        mod_path = mod_info.get("path", ".")
+        console.print(f"[dim]Target: {class_name} in {rel} (module {mod})[/dim]")
+
+        # Step 3: Classify
+        kind = classify_class(self.root / rel, class_name)
+        if kind == "dao":
+            console.print("[yellow]DAO classes need instrumented or Robolectric tests; "
+                          "out of scope for /test-gen.[/yellow]")
+            return
+        if kind == "ui":
+            console.print("[yellow]UI components (Activity, Fragment, Composable) need "
+                          "UI/instrumented tests; out of scope for JVM unit tests.[/yellow]")
+            return
+        console.print(f"[dim]Classification: {kind}[/dim]")
+
+        # Step 2: Detect test setup
+        setup = detect_test_setup(self.root, mod, modules)
+        console.print(f"[dim]Libraries: {', '.join(sorted(setup['libs'])) or '(none)'}[/dim]")
+
+        needs_suspend = has_suspend_funs(self.root / rel) or has_flow_or_viewmodelscope(self.root / rel)
+        needs_mock = has_constructor_deps(self.root / rel)
+        missing = check_required_libs(setup["libs"], needs_suspend, needs_mock,
+                                       setup["dsl"], setup.get("catalog"))
+        if missing:
+            for msg in missing:
+                console.print(f"[red]{msg}[/red]")
+            if not self.cfg.testgen_allow_gradle_edit:
+                console.print("[dim]Set AGENT_TESTGEN_ALLOW_GRADLE_EDIT=1 to let the model add them.[/dim]")
+                return
+
+        # Determine test path
+        t_path = test_file_path(self.root, mod_path, rel, class_name)
+        existing_test = t_path if (self.root / t_path).is_file() else None
+        console.print(f"[dim]Test file: {t_path}[/dim]")
+
+        # Style examples and helpers
+        examples = find_test_examples(
+            self.root, mod_path, class_name, kind,
+            max_examples=self.cfg.testgen_examples,
+        )
+        helpers = find_test_helpers(self.root, mod_path)
+
+        # Dispatcher setup for ViewModel rule
+        dispatcher_setup = "Dispatchers.setMain(StandardTestDispatcher()) in @Before / resetMain in @After"
+        for h in helpers:
+            if h["kind"] == "dispatcher-rule":
+                dispatcher_setup = f"@get:Rule val {h['name'].lower()} = {h['name']}()"
+                break
+        if kind == "viewmodel" and kind in KIND_RULES:
+            KIND_RULES["viewmodel"] = KIND_RULES["viewmodel"].replace("{dispatcher_setup}", dispatcher_setup)
+
+        # Notes
+        notes_text = ""
+        if self.cfg.notes_enabled:
+            from .notes import load_notes
+            _, notes_text = load_notes(self.root, self.cfg.notes_file,
+                                       self.cfg.notes_chars, warn_once=False)
+
+        # Step 4: Collect context
+        ctx = collect_context(
+            self.root, rel, class_name, method, kind, setup,
+            examples, helpers, notes_text, existing_test,
+            repo_map_files, self.cfg.context_chars,
+        )
+
+        # Step 5: Plan
+        plan_prompt = build_plan_prompt(class_name, method, existing_test is not None)
+        plan_messages = [
+            {"role": "system", "content": ASK_SYSTEM},
+            {"role": "user", "content": ctx + "\n\n" + plan_prompt},
+        ]
+        console.print("[dim]Generating test plan...[/dim]")
+        plan_text = self._call_model(plan_messages)
+        if plan_text is None:
+            return
+
+        show(plan_text)
+
+        if self.cfg.testgen_plan and not auto_accept:
+            console.print("\n[cyan][a]ccept, [c]ancel, or type changes[/cyan]")
+            try:
+                choice = read_message("[dim]plan › [/dim]").strip()
+            except (EOFError, KeyboardInterrupt):
+                return
+            if choice.lower() in ("c", "cancel"):
+                console.print("[dim]Cancelled.[/dim]")
+                return
+            if choice.lower() not in ("a", "accept", ""):
+                # Revision loop
+                revision_msg = [
+                    {"role": "system", "content": ASK_SYSTEM},
+                    {"role": "user", "content": ctx + "\n\n" + plan_prompt},
+                    {"role": "assistant", "content": plan_text},
+                    {"role": "user", "content": f"Revise the plan: {choice}"},
+                ]
+                plan_text = self._call_model(revision_msg)
+                if plan_text is None:
+                    return
+                show(plan_text)
+
+        # Step 6: Write tests
+        changed = {}  # type: Dict[str, Optional[str]]
+        write_prompt = build_write_prompt(setup["libs"], helpers, t_path, plan_text)
+        write_system = CODE_SYSTEM
+
+        # Ensure the test file's parent directory exists
+        test_full = self.root / t_path
+        test_full.parent.mkdir(parents=True, exist_ok=True)
+
+        # Add test path as editable
+        if t_path not in self.editable:
+            self.editable[t_path] = None
+
+        console.print("[dim]Writing tests...[/dim]")
+        self.history.append({"role": "user", "content": f"Generate tests for {class_name}"})
+
+        # Build messages with context + write prompt
+        write_messages = [
+            {"role": "system", "content": write_system},
+            {"role": "user", "content": ctx + "\n\n" + write_prompt},
+        ]
+        text = self._call_model(write_messages)
+        if text is None:
+            self.history.pop()
+            return
+
+        self.history.append({"role": "assistant", "content": text})
+        self._display(text)
+
+        blocks, problems = parse_edit_blocks(text, default_path=t_path)
+        if blocks or problems:
+            # Restrict edits to the test file only
+            filtered_blocks = []
+            for b in blocks:
+                try:
+                    b_rel = self._rel(b.path.strip())
+                except ValueError:
+                    b_rel = b.path.strip()
+                if b_rel != t_path:
+                    feedback = f"You may only edit {t_path}. Block for {b_rel} rejected."
+                    self.history.append({"role": "user", "content": feedback})
+                    continue
+                filtered_blocks.append(b)
+            errors = self._apply(filtered_blocks, changed) + problems
+            if errors:
+                console.print(f"[yellow]{len(errors)} edit(s) failed.[/yellow]")
+
+        if not changed:
+            console.print("[yellow]No test file was created.[/yellow]")
+            self.history.pop()
+            self.history.pop()
+            return
+
+        # Step 7: Compile
+        fix_rounds = 0
+        compile_task = compile_test_task(mod, modules, self.cfg.android_variant)
+        for fix_round in range(self.cfg.testgen_max_fix + 1):
+            console.print(f"[dim]Compile: ./gradlew {compile_task}[/dim]")
+            passed, output = run_gradle(
+                self.root, [compile_task], self.cfg.gradle_args, self.cfg.compile_timeout,
+            )
+            if passed:
+                console.print("[dim]Compile: passed[/dim]")
+                break
+
+            errors, all_pre = parse_kotlin_errors(output, self.root, set(changed.keys()))
+            if all_pre and errors:
+                files_str = ", ".join(sorted(set(e["file"] for e in errors if e["file"])))
+                console.print(f"[yellow]Compile errors in other files: {files_str}[/yellow]")
+                break
+
+            if errors:
+                # Only send errors in the test file
+                test_errors = [e for e in errors if e["file"] == t_path]
+                other_errors = [e for e in errors if e["file"] != t_path]
+                if other_errors and not test_errors:
+                    console.print("[yellow]Compile errors only in files outside the test; stopping.[/yellow]")
+                    break
+                err_text = format_kotlin_errors(test_errors or errors, self.root)
+            else:
+                lines = output.splitlines()
+                err_text = "\n".join(lines[-60:])
+
+            if fix_round < self.cfg.testgen_max_fix:
+                fix_rounds += 1
+                console.print(f"[dim]Compile error, fix round {fix_rounds}...[/dim]")
+                if not self._fix_with_model(err_text, "compilation", changed, ""):
+                    break
+            else:
+                console.print(f"[red]Compile errors remain after {self.cfg.testgen_max_fix} fix rounds.[/red]")
+                break
+        else:
+            pass  # compile passed on first try
+
+        # Step 8: Run tests
+        pkg = _package_from_file(self.root / rel)
+        test_fqcn = f"{pkg}.{class_name}Test" if pkg else f"{class_name}Test"
+        test_task = run_test_task(mod, modules, test_fqcn, self.cfg.android_variant)
+        test_args = f'--tests "{test_fqcn}"'
+        console.print(f"[dim]Running: ./gradlew {test_task} {test_args}[/dim]")
+
+        test_passed, test_output = run_gradle(
+            self.root,
+            [test_task, "--tests", test_fqcn],
+            self.cfg.gradle_args,
+            self.cfg.test_timeout,
+        )
+
+        # Parse results
+        xml_path = find_junit_xml(self.root, mod_path, self.cfg.android_variant, test_fqcn)
+        test_results = []  # type: List[Dict]
+        if xml_path:
+            test_results = parse_junit_xml(xml_path)
+
+        total_tests = len(test_results)
+        passed_count = sum(1 for r in test_results if r["passed"])
+        ignored_count = 0
+        suspected_bugs = []  # type: List[str]
+
+        # Handle test failures
+        if not test_passed and test_results:
+            failures = [r for r in test_results if not r["passed"]]
+            if failures:
+                failure_text = "\n".join(
+                    f"FAILED: {f['name']}\n{f['failure_message']}\n{f['failure_trace'][:500]}"
+                    for f in failures
+                )
+                feedback = (
+                    f"These tests failed:\n\n{failure_text}\n\n"
+                    "Start your reply with one line per failing test:\n"
+                    "<test name>: TEST_BUG or <test name>: CODE_BUG - <reason>\n"
+                    "TEST_BUG: fix the test.\n"
+                    "CODE_BUG: the production code is wrong. Do NOT change the assertion; "
+                    'add // SUSPECTED BUG: <reason> and @Ignore("Suspected bug: <reason>").'
+                )
+                for remaining_fix in range(max(self.cfg.testgen_max_fix - fix_rounds, 1)):
+                    console.print(f"[dim]Test failures, asking model to fix...[/dim]")
+                    if not self._fix_with_model(feedback, "tests", changed, ""):
+                        break
+                    # Re-run tests
+                    test_passed, test_output = run_gradle(
+                        self.root,
+                        [test_task, "--tests", test_fqcn],
+                        self.cfg.gradle_args,
+                        self.cfg.test_timeout,
+                    )
+                    if test_passed:
+                        if xml_path and xml_path.is_file():
+                            test_results = parse_junit_xml(xml_path)
+                        break
+
+            # Count ignored (CODE_BUG)
+            if (self.root / t_path).is_file():
+                test_text = (self.root / t_path).read_text(errors="replace")
+                bug_matches = re.findall(
+                    r'// SUSPECTED BUG:\s*(.+)', test_text
+                )
+                ignored_count = len(bug_matches)
+                suspected_bugs = bug_matches
+                total_tests = len(test_results)
+                passed_count = total_tests - ignored_count - sum(
+                    1 for r in test_results if not r["passed"]
+                )
+
+        # Save undo state
+        self.undo_stack.append(changed)
+        self.last_diffs = []
+        for c_rel, old in changed.items():
+            new = (self.root / c_rel).read_text(errors="replace") if (self.root / c_rel).exists() else ""
+            d = unified_diff(c_rel, old or "", new)
+            if d:
+                self.last_diffs.append(d)
+
+        # Step 9: Report
+        report = format_report(t_path, total_tests, passed_count, ignored_count,
+                                suspected_bugs, fix_rounds)
+        console.print(f"\n[green]{report}[/green]")
+
+        self.history.append({"role": "user", "content": f"Test generation report for {class_name}"})
+        self.history.append({"role": "assistant", "content": report})
+
     # ---- commands -------------------------------------------------------------------------
 
     def undo(self) -> None:
@@ -794,6 +1109,7 @@ def main(
     workdir: Path = typer.Option(Path.cwd(), "--dir", "-d"),
     init_notes: bool = typer.Option(False, "--init-notes", help="Generate AGENT.md project notes."),
     review: Optional[str] = typer.Option(None, "--review", help="Review changes and exit. Targets: staged, <branch>, <file>."),
+    test_gen: Optional[str] = typer.Option(None, "--test-gen", help="Generate tests for a Kotlin class and exit."),
 ):
     cfg = Config(workdir=workdir.resolve(), auto_approve=yes)
     if model:
@@ -812,6 +1128,13 @@ def main(
 
     if review is not None:
         coder.review(review)
+        return
+
+    if test_gen is not None:
+        parts = test_gen.split()
+        tg_target = parts[0] if parts else ""
+        tg_method = parts[1] if len(parts) > 1 else ""
+        coder.test_gen(tg_target, tg_method, auto_accept=yes)
         return
 
     if message:
@@ -950,6 +1273,14 @@ def main(
                             mod = map_file_to_module(f, modules)
                             mod_disp = module_display_name(mod) if mod else "(none)"
                             console.print(f"  {f} → {mod_disp}")
+            elif cmd == "/test-gen":
+                parts = arg.split()
+                tg_target = parts[0] if parts else ""
+                tg_method = parts[1] if len(parts) > 1 else ""
+                if not tg_target:
+                    console.print("[yellow]Usage: /test-gen <class|file> [method][/yellow]")
+                else:
+                    coder.test_gen(tg_target, tg_method)
             elif cmd == "/review":
                 coder.review(arg)
             elif cmd == "/notes":
