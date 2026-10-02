@@ -22,6 +22,7 @@ from rich.syntax import Syntax
 from .agent import THINK_RE, show
 from .checks import builtin_lint, custom_lint, run_tests, truncate_output
 from .config import Config
+from .notes import find_notes, gather_init_info, load_notes, notes_exist, INIT_PROMPT
 from .editblock import EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
 from .input_reader import read_message
 from .llm import LLMError, chat, list_models
@@ -102,6 +103,7 @@ HELP = """Commands:
   /lint [files]        run lint on files (default: all editable files)
   /test                run AGENT_TEST_CMD and show results
   /autotest on|off     toggle auto-test after edits
+  /notes               show project notes file
   /map [query]         show the repo map
   /tokens              estimate context usage
   /clear               clear chat history (keep files)
@@ -212,6 +214,14 @@ class Coder:
 
     def _context_messages(self, query: str) -> List[dict]:
         msgs = []
+        if self.cfg.notes_enabled:
+            _, notes_text = load_notes(self.root, self.cfg.notes_file,
+                                       self.cfg.notes_chars, warn_once=False)
+            if notes_text:
+                msgs += [
+                    {"role": "user", "content": "Project notes from the developer. Follow them:\n\n" + notes_text},
+                    {"role": "assistant", "content": "Ok, I'll follow these project notes."},
+                ]
         if self.repo_map is not None:
             self.repo_map.build()
             in_chat = set(self.editable) | set(self.read_only)
@@ -264,6 +274,10 @@ class Coder:
     def token_report(self) -> None:
         msgs = self.build_messages("")
         parts = [("system prompt", len(msgs[0]["content"]))]
+        if self.cfg.notes_enabled:
+            _, notes_text = load_notes(self.root, self.cfg.notes_file, self.cfg.notes_chars, warn_once=False)
+            if notes_text:
+                parts.append(("project notes", len(notes_text)))
         if self.repo_map is not None:
             parts.append(("repo map", len(msgs[1]["content"])))
         for f in list(self.editable) + list(self.read_only):
@@ -597,12 +611,17 @@ def main(
     model: Optional[str] = typer.Option(None, "--model", "-m"),
     base_url: Optional[str] = typer.Option(None, "--base-url", "-u"),
     workdir: Path = typer.Option(Path.cwd(), "--dir", "-d"),
+    init_notes: bool = typer.Option(False, "--init-notes", help="Generate AGENT.md project notes."),
 ):
     cfg = Config(workdir=workdir.resolve(), auto_approve=yes)
     if model:
         cfg.model = model
     if base_url:
         cfg.base_url = base_url
+    if init_notes:
+        _do_init_notes(cfg)
+        return
+
     coder = Coder(cfg, mode="ask" if ask else "code")
     if files:
         coder.add(files)
@@ -614,6 +633,10 @@ def main(
         return
 
     console.print(f"[bold]coder[/bold] · {cfg.model} @ {cfg.base_url} · {cfg.workdir}")
+    if cfg.notes_enabled:
+        notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars)
+        if notes_path:
+            console.print(f"[dim]Project notes: {notes_path.name} ({len(notes_text):,} chars)[/dim]")
     if coder.repo_map is not None:
         with console.status("[dim]indexing repo map...[/dim]"):
             total, _ = coder.repo_map.build()
@@ -696,6 +719,18 @@ def main(
                 else:
                     state = "on" if coder.cfg.auto_test else "off"
                     console.print(f"[dim]Auto-test: {state}. Usage: /autotest on|off[/dim]")
+            elif cmd == "/notes":
+                if cfg.notes_enabled:
+                    notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars, warn_once=False)
+                    if notes_path:
+                        console.print(f"[dim]Notes file: {notes_path}[/dim]")
+                        console.print(notes_text, markup=False, highlight=False)
+                    else:
+                        console.print("[dim]No project notes file found. Create one with:\n"
+                                      "  coder --init-notes\n"
+                                      "Or create AGENT.md in the project root.[/dim]")
+                else:
+                    console.print("[dim]Project notes disabled (AGENT_NOTES=0).[/dim]")
             elif cmd == "/run":
                 coder.run(arg) if arg else console.print("[yellow]Usage: /run <command>[/yellow]")
             elif cmd == "/map":
@@ -722,6 +757,48 @@ def main(
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
         console.print()
+
+
+def _do_init_notes(cfg: Config) -> None:
+    """Generate AGENT.md by asking the model about the project."""
+    if notes_exist(cfg.workdir, cfg.notes_file):
+        console.print("[yellow]A project notes file already exists. "
+                      "Edit it directly or delete it first.[/yellow]")
+        return
+
+    from .repomap import RepoMap
+    rm = RepoMap(cfg.workdir)
+    with console.status("[dim]indexing repo...[/dim]"):
+        rm.build()
+    map_text = rm.render(budget=cfg.map_chars)
+    info = gather_init_info(cfg.workdir, map_text)
+    prompt = INIT_PROMPT.format(info=info)
+
+    console.print("[dim]Asking the model to draft project notes...[/dim]")
+    from .llm import chat as llm_chat, LLMError
+    messages = [
+        {"role": "system", "content": "You are a helpful assistant. Write concise, accurate project documentation."},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        with console.status("[dim]waiting for model...[/dim]"):
+            reply = llm_chat(cfg, messages)
+    except LLMError as e:
+        console.print(f"[red]{e}[/red]")
+        return
+
+    draft = reply.content.strip()
+    console.print("\n" + draft + "\n")
+
+    if not Confirm.ask("Save as AGENT.md?", default=True):
+        console.print("[dim]Not saved.[/dim]")
+        return
+
+    out = cfg.workdir / "AGENT.md"
+    out.write_text(draft + "\n")
+    console.print(f"[green]Saved {out}[/green]")
+    console.print("[dim]Review and edit it — the model drafted it from your code, "
+                  "so check that it's accurate.[/dim]")
 
 
 if __name__ == "__main__":

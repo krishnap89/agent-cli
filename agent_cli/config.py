@@ -25,6 +25,9 @@ class Config:
     auto_test: bool = os.getenv("AGENT_AUTO_TEST", "0") not in ("0", "false")
     test_timeout: int = int(os.getenv("AGENT_TEST_TIMEOUT", "600"))
     check_output_chars: int = int(os.getenv("AGENT_CHECK_OUTPUT_CHARS", "4000"))
+    notes_enabled: bool = os.getenv("AGENT_NOTES", "1") not in ("0", "false")
+    notes_file: str = os.getenv("AGENT_NOTES_FILE", "")
+    notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))
     debug: bool = os.getenv("AGENT_DEBUG", "") not in ("", "0", "false")
     workdir: Path = field(default_factory=Path.cwd)
     auto_approve: bool = False

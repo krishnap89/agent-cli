@@ -6,6 +6,7 @@ from rich.markdown import Markdown
 
 from .config import CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION, Config, SYSTEM_PROMPT
 from .llm import LLMError, chat
+from .notes import load_notes
 from .tools import TOOL_SCHEMAS, ToolError, Tools
 
 console = Console()
@@ -74,6 +75,11 @@ class Agent:
                 tool_docs=render_tool_docs(),
                 repo_map_section=self._repo_map_section(),
             )
+            if self.cfg.notes_enabled:
+                _, notes_text = load_notes(self.cfg.workdir, self.cfg.notes_file,
+                                           self.cfg.notes_chars, warn_once=True)
+                if notes_text:
+                    system += "\n# Project notes\n" + notes_text + "\n"
         self.messages: list[dict] = [{"role": "system", "content": system}]
 
     def _repo_map_section(self) -> str:
