@@ -17,7 +17,14 @@ class Config:
     map_chars: int = int(os.getenv("AGENT_MAP_CHARS", "4000"))  # repo map size in the prompt
     context_chars: int = int(os.getenv("AGENT_CONTEXT_CHARS", "48000"))  # ~12k tokens, coder
     max_reflections: int = int(os.getenv("AGENT_MAX_REFLECTIONS", "2"))  # coder: retries for failed edits
+    max_fix_attempts: int = int(os.getenv("AGENT_MAX_FIX_ATTEMPTS", "2"))
     max_turns: int = int(os.getenv("AGENT_MAX_TURNS", "30"))
+    lint_enabled: bool = os.getenv("AGENT_LINT", "1") not in ("0", "false")
+    lint_cmd: str = os.getenv("AGENT_LINT_CMD", "")
+    test_cmd: str = os.getenv("AGENT_TEST_CMD", "")
+    auto_test: bool = os.getenv("AGENT_AUTO_TEST", "0") not in ("0", "false")
+    test_timeout: int = int(os.getenv("AGENT_TEST_TIMEOUT", "600"))
+    check_output_chars: int = int(os.getenv("AGENT_CHECK_OUTPUT_CHARS", "4000"))
     debug: bool = os.getenv("AGENT_DEBUG", "") not in ("", "0", "false")
     workdir: Path = field(default_factory=Path.cwd)
     auto_approve: bool = False

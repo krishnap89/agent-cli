@@ -20,6 +20,7 @@ from rich.prompt import Confirm
 from rich.syntax import Syntax
 
 from .agent import THINK_RE, show
+from .checks import builtin_lint, custom_lint, run_tests, truncate_output
 from .config import Config
 from .editblock import EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
 from .input_reader import read_message
@@ -98,6 +99,9 @@ HELP = """Commands:
   /diff                show the last edits
   /undo                undo the last edits
   /run <command>       run a command; optionally share output with the model
+  /lint [files]        run lint on files (default: all editable files)
+  /test                run AGENT_TEST_CMD and show results
+  /autotest on|off     toggle auto-test after edits
   /map [query]         show the repo map
   /tokens              estimate context usage
   /clear               clear chat history (keep files)
@@ -333,6 +337,7 @@ class Coder:
             self.history.append({"role": "user", "content": feedback})
 
         if changed:
+            self._run_checks_loop(changed, user_text)
             self.undo_stack.append(changed)
             self.last_diffs = []
             for rel, old in changed.items():
@@ -340,7 +345,6 @@ class Coder:
                 d = unified_diff(rel, old or "", new)
                 if d:
                     self.last_diffs.append(d)
-            console.print(f"[green]Applied edits to {', '.join(changed)}[/green] [dim](/undo to revert)[/dim]")
             if self.repo_map is not None:
                 self._all_files = None
 
@@ -436,6 +440,102 @@ class Coder:
             if not applied and Confirm.ask("Re-send your request with these files?", default=True):
                 self.history = self.history[:-2] if len(self.history) >= 2 else []
                 self.send(user_text, _resend=True)
+
+    # ---- checks (lint + test) --------------------------------------------------------------
+
+    def _run_checks_loop(self, changed: Dict[str, Optional[str]], user_text: str) -> None:
+        """After edits are applied, run lint and optionally tests, feeding errors back."""
+        if self.mode != "code" or not self.cfg.lint_enabled:
+            console.print(f"[green]Applied edits to {', '.join(changed)}[/green] [dim](/undo to revert)[/dim]")
+            return
+
+        changed_files = list(changed.keys())
+        for fix_attempt in range(self.cfg.max_fix_attempts + 1):
+            # --- lint ---
+            lint_errors = self.run_lint(changed_files)
+            if lint_errors:
+                err_text = "\n".join(lint_errors)
+                if fix_attempt < self.cfg.max_fix_attempts:
+                    console.print(f"[yellow]Lint errors:[/yellow]\n{err_text}")
+                    console.print(f"[dim]Asking the model to fix it (attempt {fix_attempt + 1} "
+                                  f"of {self.cfg.max_fix_attempts})...[/dim]")
+                    if not self._fix_with_model(err_text, "lint", changed, user_text):
+                        return
+                    continue
+                else:
+                    console.print(f"[red]Lint errors remain after {self.cfg.max_fix_attempts} "
+                                  f"fix attempts:[/red]\n{err_text}")
+                    console.print(f"[green]Applied edits to {', '.join(changed)}[/green] "
+                                  f"[dim](/undo to revert)[/dim]")
+                    return
+
+            console.print("[dim]Lint: passed[/dim]")
+
+            # --- tests ---
+            if not self.cfg.auto_test or not self.cfg.test_cmd:
+                console.print(f"[green]Applied edits to {', '.join(changed)}[/green] [dim](/undo to revert)[/dim]")
+                return
+
+            passed, output = run_tests(self.root, self.cfg.test_cmd, self.cfg.test_timeout)
+            if passed:
+                console.print(f"[dim]Tests: {self.cfg.test_cmd} ... passed[/dim]")
+                console.print(f"[green]Applied edits to {', '.join(changed)}[/green] [dim](/undo to revert)[/dim]")
+                return
+
+            truncated = truncate_output(output, self.cfg.check_output_chars)
+            if fix_attempt < self.cfg.max_fix_attempts:
+                console.print(f"[yellow]Tests failed:[/yellow]\n{truncated[-2000:]}")
+                console.print(f"[dim]Asking the model to fix it (attempt {fix_attempt + 1} "
+                              f"of {self.cfg.max_fix_attempts})...[/dim]")
+                if not self._fix_with_model(truncated, "the tests", changed, user_text):
+                    return
+                continue
+            else:
+                console.print(f"[red]Tests still failing after {self.cfg.max_fix_attempts} "
+                              f"fix attempts.[/red]")
+                console.print(f"[green]Applied edits to {', '.join(changed)}[/green] "
+                              f"[dim](/undo to revert)[/dim]")
+                return
+
+        console.print(f"[green]Applied edits to {', '.join(changed)}[/green] [dim](/undo to revert)[/dim]")
+
+    def _fix_with_model(self, error_text: str, what: str,
+                        changed: Dict[str, Optional[str]], user_text: str) -> bool:
+        """Send check errors to model for fixing. Returns True if model replied with edits."""
+        truncated = truncate_output(error_text, self.cfg.check_output_chars)
+        feedback = (f"Your edits were applied, but {what} failed:\n\n{truncated}\n\n"
+                    "Fix the problem with SEARCH/REPLACE blocks. The files in the chat "
+                    "show their current contents, including your previous edits.")
+        self.history.append({"role": "user", "content": feedback})
+        text = self._call_model(self.build_messages(user_text))
+        if text is None:
+            return False
+        self.history.append({"role": "assistant", "content": text})
+        self._display(text)
+        blocks, problems = parse_edit_blocks(text, default_path=self._single_file())
+        if blocks or problems:
+            errors = self._apply(blocks, changed) + problems
+            if errors:
+                console.print(f"[yellow]{len(errors)} edit(s) failed during fix attempt.[/yellow]")
+        return True
+
+    def run_lint(self, files: Optional[List[str]] = None) -> List[str]:
+        """Run lint checks on the given files. Returns list of error strings."""
+        if files is None:
+            files = list(self.editable.keys())
+        errors = builtin_lint(self.root, files)
+        if self.cfg.lint_cmd and files:
+            custom_err = custom_lint(self.root, files, self.cfg.lint_cmd)
+            if custom_err:
+                errors.append(custom_err)
+        return errors
+
+    def run_test(self) -> Optional[str]:
+        """Run test command. Returns error output or None on success."""
+        if not self.cfg.test_cmd:
+            return None
+        passed, output = run_tests(self.root, self.cfg.test_cmd, self.cfg.test_timeout)
+        return None if passed else output
 
     # ---- commands -------------------------------------------------------------------------
 
@@ -561,6 +661,41 @@ def main(
                 coder.undo()
             elif cmd == "/diff":
                 coder.show_diff()
+            elif cmd == "/lint":
+                lint_files = args if args else None
+                errors = coder.run_lint(lint_files)
+                if errors:
+                    for e in errors:
+                        console.print(f"[yellow]{e}[/yellow]")
+                    if Confirm.ask("Ask the model to fix them?", default=True):
+                        feedback = "\n\n".join(errors)
+                        coder.send(f"Fix these lint errors:\n\n{feedback}", mode="code")
+                else:
+                    console.print("[green]Lint: passed[/green]")
+            elif cmd == "/test":
+                if not coder.cfg.test_cmd:
+                    console.print("[yellow]No test command set. Set AGENT_TEST_CMD.[/yellow]")
+                else:
+                    console.print(f"[dim]Running: {coder.cfg.test_cmd}[/dim]")
+                    err = coder.run_test()
+                    if err:
+                        truncated = truncate_output(err, coder.cfg.check_output_chars)
+                        console.print(truncated[-3000:], markup=False, highlight=False)
+                        console.print("[red]Tests failed.[/red]")
+                        if Confirm.ask("Ask the model to fix them?", default=True):
+                            coder.send(f"Fix these test failures:\n\n{truncated}", mode="code")
+                    else:
+                        console.print("[green]Tests passed.[/green]")
+            elif cmd == "/autotest":
+                if arg in ("on", "1"):
+                    coder.cfg.auto_test = True
+                    console.print("[dim]Auto-test: on[/dim]")
+                elif arg in ("off", "0"):
+                    coder.cfg.auto_test = False
+                    console.print("[dim]Auto-test: off[/dim]")
+                else:
+                    state = "on" if coder.cfg.auto_test else "off"
+                    console.print(f"[dim]Auto-test: {state}. Usage: /autotest on|off[/dim]")
             elif cmd == "/run":
                 coder.run(arg) if arg else console.print("[yellow]Usage: /run <command>[/yellow]")
             elif cmd == "/map":
