@@ -3,8 +3,10 @@
 Used by coder after applying edits to catch errors before the user sees broken code.
 """
 import json
+import os
 import shlex
 import subprocess
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -23,6 +25,10 @@ def builtin_lint(root: Path, files: List[str]) -> List[str]:
                 errors.append(err)
         elif ext == ".json":
             err = _check_json(path, rel)
+            if err:
+                errors.append(err)
+        elif ext == ".xml":
+            err = _check_xml(path, rel)
             if err:
                 errors.append(err)
     return errors
@@ -52,6 +58,21 @@ def _check_json(path: Path, rel: str) -> Optional[str]:
         return None
     except json.JSONDecodeError as e:
         return f"{rel} line {e.lineno} col {e.colno}: JSONDecodeError: {e.msg}"
+
+
+def _check_xml(path: Path, rel: str) -> Optional[str]:
+    try:
+        ET.parse(str(path))
+        return None
+    except ET.ParseError as e:
+        line, col = e.position if hasattr(e, "position") else (1, 0)
+        return f"{rel} line {line} col {col}: XMLParseError: {e}"
+
+
+def ext_lint_cmd(ext: str) -> Optional[str]:
+    """Look up AGENT_LINT_CMD_<EXT> env var. ext should be like '.kt'."""
+    key = "AGENT_LINT_CMD_" + ext.lstrip(".").upper()
+    return os.environ.get(key, "") or None
 
 
 def custom_lint(root: Path, files: List[str], cmd: str, timeout: int = 60) -> Optional[str]:

@@ -25,6 +25,12 @@ class Config:
     auto_test: bool = os.getenv("AGENT_AUTO_TEST", "0") not in ("0", "false")
     test_timeout: int = int(os.getenv("AGENT_TEST_TIMEOUT", "600"))
     check_output_chars: int = int(os.getenv("AGENT_CHECK_OUTPUT_CHARS", "4000"))
+    android: str = os.getenv("AGENT_ANDROID", "auto")  # auto|on|off
+    android_variant: str = os.getenv("AGENT_ANDROID_VARIANT", "Debug")
+    compile_enabled: str = os.getenv("AGENT_COMPILE", "")  # on|off, default on when android detected
+    compile_timeout: int = int(os.getenv("AGENT_COMPILE_TIMEOUT", "600"))
+    gradle_args: str = os.getenv("AGENT_GRADLE_ARGS", "--offline --console=plain -q")
+    ktlint_mode: str = os.getenv("AGENT_KTLINT", "syntax")  # syntax|full|off
     notes_enabled: bool = os.getenv("AGENT_NOTES", "1") not in ("0", "false")
     notes_file: str = os.getenv("AGENT_NOTES_FILE", "")
     notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))

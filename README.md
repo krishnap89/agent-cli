@@ -67,17 +67,80 @@ repo map and settings:
   to stay under it, and you're warned if the files alone are too big.
 
 ## Automatic checks after edits
-After applying edits, coder runs built-in lint (Python syntax, JSON validity)
-and optionally a custom lint command and tests. Errors are fed back to the
-model for automatic fixing (up to AGENT_MAX_FIX_ATTEMPTS rounds, default 2).
+After applying edits, coder runs built-in lint (Python syntax, JSON validity,
+XML well-formedness) and optionally a custom lint command and tests. Errors
+are fed back to the model for automatic fixing (up to AGENT_MAX_FIX_ATTEMPTS
+rounds, default 2).
 
     AGENT_LINT=1            # enable/disable built-in lint (default: on)
     AGENT_LINT_CMD="ruff check {files}"  # custom lint; {files} is replaced
+    AGENT_LINT_CMD_KT="ktlint {files}"   # per-extension lint command
+    AGENT_LINT_CMD_XML="xmllint {files}"  # (AGENT_LINT_CMD_<EXT>)
     AGENT_TEST_CMD="python -m pytest"    # test command for /test and auto-test
     AGENT_AUTO_TEST=1       # run tests after every edit (default: off)
     AGENT_TEST_TIMEOUT=600  # seconds before test command is killed
     AGENT_CHECK_OUTPUT_CHARS=4000  # max chars of check output sent to model
     AGENT_MAX_FIX_ATTEMPTS=2      # auto-fix rounds for lint/test failures
+
+Per-extension lint commands (`AGENT_LINT_CMD_<EXT>`, e.g. `AGENT_LINT_CMD_KT`)
+run on the changed files of that extension only. Lookup order per file:
+`AGENT_LINT_CMD_<EXT>`, then `AGENT_LINT_CMD`, then built-in check.
+
+## Kotlin / Android support
+For Kotlin Android projects built with Gradle, coder detects modules
+automatically and runs compile checks after edits.
+
+**Detection.** `AGENT_ANDROID=auto|on|off` (default `auto`). In auto mode, the
+project is detected as Android if it has `gradlew`, `settings.gradle(.kts)`,
+and at least one `build.gradle(.kts)` applying an Android plugin (including
+version catalog aliases in `libs.versions.toml`).
+
+**Module mapping.** Each changed file is mapped to its nearest Gradle module
+(the closest ancestor with `build.gradle(.kts)`). Android modules use
+`compile<Variant>Kotlin`; plain Kotlin modules use `compileKotlin`; XML-only
+changes in Android modules use `process<Variant>Resources`.
+
+**Compile check.** After lint passes, `./gradlew <tasks> <AGENT_GRADLE_ARGS>`
+runs. Kotlin compiler errors are parsed, de-duplicated, and sent to the model
+with code context. Errors only in files you didn't change are not sent.
+
+    AGENT_COMPILE=on|off     # default: on when Android detected
+    AGENT_COMPILE_TIMEOUT=600
+    AGENT_ANDROID_VARIANT=Debug
+    AGENT_GRADLE_ARGS="--offline --console=plain -q"
+
+**ktlint (optional).** If `ktlint` is on PATH and `AGENT_KTLINT` is not `off`,
+it runs before the compile check. `syntax` (default) only reports parse
+failures; `full` reports all violations.
+
+    AGENT_KTLINT=syntax|full|off
+
+**Test command examples for Android:**
+
+    AGENT_TEST_CMD="./gradlew :app:testDebugUnitTest --offline --console=plain -q"
+
+**New commands:**
+
+    /compile [all]    run compile check on modules of files in chat
+    /modules          list detected modules and file-to-module mapping
+
+## Gradle and the corporate proxy
+Gradle (a Java program) ignores `HTTP_PROXY` / `HTTPS_PROXY`. Proxy settings
+go in `~/.gradle/gradle.properties`:
+
+    systemProp.http.proxyHost=proxy.corp.example.com
+    systemProp.http.proxyPort=8080
+    systemProp.http.proxyUser=user
+    systemProp.http.proxyPassword=pass
+    systemProp.http.nonProxyHosts=localhost|127.0.0.1
+    systemProp.https.proxyHost=proxy.corp.example.com
+    systemProp.https.proxyPort=8080
+    systemProp.https.proxyUser=user
+    systemProp.https.proxyPassword=pass
+
+Recommendation: keep `--offline` in `AGENT_GRADLE_ARGS` once all dependencies
+are cached by a normal Android Studio build. If `gradlew` isn't executable,
+run `chmod +x gradlew`.
 
 ## Project notes
 Create an AGENT.md (or CONVENTIONS.md, .agent/notes.md) in your project root

@@ -20,7 +20,12 @@ from rich.prompt import Confirm
 from rich.syntax import Syntax
 
 from .agent import THINK_RE, show
-from .checks import builtin_lint, custom_lint, run_tests, truncate_output
+from .android import (
+    detect_android, compile_tasks, run_gradle, parse_kotlin_errors,
+    format_kotlin_errors, format_detected_modules, is_offline_dependency_error,
+    is_build_config_file, map_file_to_module, module_display_name, run_ktlint,
+)
+from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
 from .config import Config
 from .notes import find_notes, gather_init_info, load_notes, notes_exist, INIT_PROMPT
 from .review import (
@@ -107,6 +112,8 @@ HELP = """Commands:
   /lint [files]        run lint on files (default: all editable files)
   /test                run AGENT_TEST_CMD and show results
   /autotest on|off     toggle auto-test after edits
+  /compile [all]       run Gradle compile check on modules of files in chat
+  /modules             list detected modules and file-to-module mapping
   /review [target]     review changes (uncommitted, staged, branch, files)
   /notes               show project notes file
   /map [query]         show the repo map
@@ -129,6 +136,9 @@ class Coder:
         self.last_diffs: List[str] = []
         self.repo_map = RepoMap(self.root) if cfg.use_map else None
         self._all_files: Optional[List[str]] = None
+        self.android_info = detect_android(self.root, cfg.android)
+        if self.android_info is not None and not cfg.compile_enabled:
+            cfg.compile_enabled = "on"
 
     # ---- files -------------------------------------------------------------------
 
@@ -470,8 +480,15 @@ class Coder:
 
         changed_files = list(changed.keys())
         for fix_attempt in range(self.cfg.max_fix_attempts + 1):
-            # --- lint ---
+            # --- lint (built-in + custom + per-ext) ---
             lint_errors = self.run_lint(changed_files)
+
+            # --- ktlint (before compile) ---
+            if not lint_errors and self.android_info is not None:
+                ktlint_errs = run_ktlint(self.root, changed_files, self.cfg.ktlint_mode)
+                if ktlint_errs:
+                    lint_errors.extend(ktlint_errs)
+
             if lint_errors:
                 err_text = "\n".join(lint_errors)
                 if fix_attempt < self.cfg.max_fix_attempts:
@@ -489,6 +506,22 @@ class Coder:
                     return
 
             console.print("[dim]Lint: passed[/dim]")
+
+            # --- compile check (Gradle) ---
+            compile_err = self._run_compile_check(changed_files, set(changed.keys()))
+            if compile_err:
+                if fix_attempt < self.cfg.max_fix_attempts:
+                    console.print(f"[dim]Asking the model to fix it (attempt {fix_attempt + 1} "
+                                  f"of {self.cfg.max_fix_attempts})...[/dim]")
+                    if not self._fix_with_model(compile_err, "the compile check", changed, user_text):
+                        return
+                    continue
+                else:
+                    console.print(f"[red]Compile errors remain after {self.cfg.max_fix_attempts} "
+                                  f"fix attempts.[/red]")
+                    console.print(f"[green]Applied edits to {', '.join(changed)}[/green] "
+                                  f"[dim](/undo to revert)[/dim]")
+                    return
 
             # --- tests ---
             if not self.cfg.auto_test or not self.cfg.test_cmd:
@@ -518,6 +551,61 @@ class Coder:
 
         console.print(f"[green]Applied edits to {', '.join(changed)}[/green] [dim](/undo to revert)[/dim]")
 
+    def _run_compile_check(
+        self,
+        changed_files: List[str],
+        changed_set: set,
+    ) -> Optional[str]:
+        """Run Gradle compile check if applicable. Returns error text for model or None."""
+        if self.cfg.compile_enabled != "on" or self.android_info is None:
+            return None
+
+        modules = self.android_info["modules"]
+        tasks, is_build_config = compile_tasks(changed_files, modules, self.cfg.android_variant)
+        if not tasks:
+            return None
+
+        task_desc = " ".join(tasks)
+        console.print(f"[dim]Compile: ./gradlew {task_desc}[/dim]")
+
+        passed, output = run_gradle(
+            self.root, tasks, self.cfg.gradle_args, self.cfg.compile_timeout,
+        )
+
+        if passed:
+            console.print("[dim]Compile: passed[/dim]")
+            return None
+
+        if is_offline_dependency_error(output):
+            console.print(
+                "[yellow]Compile failed due to missing dependencies in offline mode.\n"
+                "Run one online build in Android Studio or remove --offline from "
+                "AGENT_GRADLE_ARGS.[/yellow]"
+            )
+            return None
+
+        errors, all_pre_existing = parse_kotlin_errors(
+            output, self.root, changed_set,
+        )
+
+        if all_pre_existing and errors:
+            files_str = ", ".join(sorted(set(e["file"] for e in errors if e["file"])))
+            console.print(
+                f"[yellow]Compile errors in files you didn't change: {files_str}[/yellow]"
+            )
+            return None
+
+        if errors:
+            err_text = format_kotlin_errors(errors, self.root)
+            console.print(f"[yellow]Compile errors:[/yellow]\n{err_text}")
+            return err_text
+
+        # No e: lines found; send last 60 lines of output
+        lines = output.splitlines()
+        tail = "\n".join(lines[-60:])
+        console.print(f"[yellow]Compile failed:[/yellow]\n{tail[-2000:]}")
+        return tail
+
     def _fix_with_model(self, error_text: str, what: str,
                         changed: Dict[str, Optional[str]], user_text: str) -> bool:
         """Send check errors to model for fixing. Returns True if model replied with edits."""
@@ -539,14 +627,39 @@ class Coder:
         return True
 
     def run_lint(self, files: Optional[List[str]] = None) -> List[str]:
-        """Run lint checks on the given files. Returns list of error strings."""
+        """Run lint checks on the given files. Returns list of error strings.
+
+        Lookup order per file: AGENT_LINT_CMD_<EXT>, then AGENT_LINT_CMD, then built-in.
+        """
         if files is None:
             files = list(self.editable.keys())
-        errors = builtin_lint(self.root, files)
-        if self.cfg.lint_cmd and files:
-            custom_err = custom_lint(self.root, files, self.cfg.lint_cmd)
+
+        by_ext = {}  # type: Dict[str, List[str]]
+        builtin_files = []  # type: List[str]
+        global_lint_files = []  # type: List[str]
+        for f in files:
+            ext = Path(f).suffix.lower()
+            per_ext = ext_lint_cmd(ext)
+            if per_ext:
+                by_ext.setdefault(ext, []).append(f)
+            else:
+                builtin_files.append(f)
+                global_lint_files.append(f)
+
+        errors = builtin_lint(self.root, builtin_files)
+
+        for ext, ext_files in by_ext.items():
+            cmd = ext_lint_cmd(ext)
+            if cmd:
+                err = custom_lint(self.root, ext_files, cmd)
+                if err:
+                    errors.append(err)
+
+        if self.cfg.lint_cmd and global_lint_files:
+            custom_err = custom_lint(self.root, global_lint_files, self.cfg.lint_cmd)
             if custom_err:
                 errors.append(custom_err)
+
         return errors
 
     def run_test(self) -> Optional[str]:
@@ -706,6 +819,9 @@ def main(
         return
 
     console.print(f"[bold]coder[/bold] · {cfg.model} @ {cfg.base_url} · {cfg.workdir}")
+    if coder.android_info is not None:
+        mods = format_detected_modules(coder.android_info["modules"])
+        console.print(f"[dim]Android project detected (modules: {mods})[/dim]")
     if cfg.notes_enabled:
         notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars)
         if notes_path:
@@ -792,6 +908,48 @@ def main(
                 else:
                     state = "on" if coder.cfg.auto_test else "off"
                     console.print(f"[dim]Auto-test: {state}. Usage: /autotest on|off[/dim]")
+            elif cmd == "/compile":
+                if coder.android_info is None:
+                    console.print("[yellow]No Android/Gradle project detected.[/yellow]")
+                elif coder.cfg.compile_enabled != "on":
+                    console.print("[yellow]Compile check is off (AGENT_COMPILE=off).[/yellow]")
+                else:
+                    modules = coder.android_info["modules"]
+                    if arg == "all":
+                        all_mod_files = []
+                        for mod_name, mod_info in modules.items():
+                            mod_path = mod_info["path"]
+                            for f in list(coder.editable) + list(coder.read_only):
+                                all_mod_files.append(f)
+                        compile_files = all_mod_files or list(coder.editable)
+                    else:
+                        compile_files = list(coder.editable)
+                    if not compile_files:
+                        console.print("[dim]No files in the chat to compile.[/dim]")
+                    else:
+                        err = coder._run_compile_check(compile_files, set(compile_files))
+                        if err:
+                            if Confirm.ask("Ask the model to fix them?", default=True):
+                                coder.send(f"Fix these compile errors:\n\n{err}", mode="code")
+                        elif err is None:
+                            pass  # already printed pass/skip message
+            elif cmd == "/modules":
+                if coder.android_info is None:
+                    console.print("[dim]No Android/Gradle project detected.[/dim]")
+                else:
+                    modules = coder.android_info["modules"]
+                    console.print("[dim]Detected modules:[/dim]")
+                    for mod_name in sorted(modules):
+                        info = modules[mod_name]
+                        kind = "Android" if info["android"] else "Kotlin/JVM"
+                        console.print(f"  {module_display_name(mod_name)} ({info['path']}) [{kind}]")
+                    in_chat = list(coder.editable) + list(coder.read_only)
+                    if in_chat:
+                        console.print("[dim]File → module mapping:[/dim]")
+                        for f in in_chat:
+                            mod = map_file_to_module(f, modules)
+                            mod_disp = module_display_name(mod) if mod else "(none)"
+                            console.print(f"  {f} → {mod_disp}")
             elif cmd == "/review":
                 coder.review(arg)
             elif cmd == "/notes":
