@@ -36,6 +36,10 @@ class Config:
     testgen_methods_per_step: int = int(os.getenv("AGENT_TESTGEN_METHODS_PER_STEP", "4"))
     testgen_plan: bool = os.getenv("AGENT_TESTGEN_PLAN", "1") not in ("0", "false")
     testgen_allow_gradle_edit: bool = os.getenv("AGENT_TESTGEN_ALLOW_GRADLE_EDIT", "0") not in ("0", "false")
+    doc_properties: bool = os.getenv("AGENT_DOC_PROPERTIES", "0") not in ("0", "false")
+    doc_visibility: str = os.getenv("AGENT_DOC_VISIBILITY", "internal")  # public|internal
+    doc_per_step: int = int(os.getenv("AGENT_DOC_PER_STEP", "8"))
+    doc_max_fix: int = int(os.getenv("AGENT_DOC_MAX_FIX", "2"))
     notes_enabled: bool = os.getenv("AGENT_NOTES", "1") not in ("0", "false")
     notes_file: str = os.getenv("AGENT_NOTES_FILE", "")
     notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))

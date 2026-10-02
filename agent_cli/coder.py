@@ -124,6 +124,7 @@ HELP = """Commands:
   /modules             list detected modules and file-to-module mapping
   /review [target]     review changes (uncommitted, staged, branch, files)
   /test-gen <class>    generate unit tests for a Kotlin class
+  /doc <target>        add KDoc to Kotlin declarations (class, file, folder)
   /notes               show project notes file
   /map [query]         show the repo map
   /tokens              estimate context usage
@@ -1047,6 +1048,194 @@ class Coder:
         self.history.append({"role": "user", "content": f"Test generation report for {class_name}"})
         self.history.append({"role": "assistant", "content": report})
 
+    # ---- doc (KDoc generation) -----------------------------------------------------------
+
+    def doc_gen(self, target: str, update_mode: bool = False) -> None:
+        """Generate KDoc for Kotlin declarations."""
+        from .docgen import (
+            scan_declarations, filter_declarations, detect_kdoc_style,
+            build_style_prompt, build_doc_messages, find_outdated_kdoc,
+            verify_code_unchanged, verify_kdoc_balanced, resolve_doc_target,
+            format_doc_report,
+        )
+
+        repo_map_files = {}  # type: Dict[str, Any]
+        if self.repo_map is not None:
+            self.repo_map.build()
+            repo_map_files = self.repo_map.files
+
+        # Resolve target to file(s)
+        try:
+            kt_files = resolve_doc_target(self.root, target, repo_map_files)
+        except ValueError as e:
+            console.print(f"[yellow]{e}[/yellow]")
+            return
+
+        if len(kt_files) > 10:
+            if not (self.cfg.auto_approve or Confirm.ask(
+                    f"{len(kt_files)} Kotlin files found. Continue?", default=True)):
+                return
+
+        # Detect style from existing KDoc
+        module_path = ""
+        if kt_files:
+            parts = kt_files[0].split("/")
+            if "src" in parts:
+                module_path = "/".join(parts[:parts.index("src")])
+        style = detect_kdoc_style(self.root, module_path)
+        console.print(f"[dim]Style: {'tags' if style['uses_tags'] else 'prose'}, "
+                       f"{style['summary_style']}, {style['max_width']} cols[/dim]")
+
+        notes_text = ""
+        if self.cfg.notes_enabled:
+            _, notes_text = load_notes(self.root, self.cfg.notes_file,
+                                       self.cfg.notes_chars, warn_once=False)
+
+        total_documented = 0
+        total_skipped_existing = 0
+        total_skipped_override = 0
+        total_updated = 0
+        files_changed = 0
+        all_changed = {}  # type: Dict[str, Optional[str]]
+        code_verified = True
+
+        for file_idx, rel in enumerate(kt_files):
+            path = self.root / rel
+            try:
+                source = path.read_text(errors="replace")
+            except OSError as e:
+                console.print(f"[yellow]Cannot read {rel}: {e}[/yellow]")
+                continue
+
+            decls = scan_declarations(source)
+            all_decls = list(decls)
+
+            # Count skips
+            for d in all_decls:
+                if d.is_override:
+                    total_skipped_override += 1
+                elif d.has_kdoc and not update_mode:
+                    total_skipped_existing += 1
+
+            # Filter
+            to_doc = filter_declarations(
+                decls, rel,
+                visibility_filter=self.cfg.doc_visibility,
+                include_properties=self.cfg.doc_properties,
+                update_mode=update_mode,
+            )
+
+            # In update mode, also find outdated ones
+            if update_mode:
+                outdated = find_outdated_kdoc(source, all_decls, style["uses_tags"])
+                outdated_names = {d.name for d in outdated}
+                to_doc = [d for d in to_doc if not d.has_kdoc or d.name in outdated_names]
+
+            if not to_doc:
+                continue
+
+            console.print(f"[dim][{file_idx + 1}/{len(kt_files)}] {rel}: "
+                           f"{len(to_doc)} declaration{'s' if len(to_doc) != 1 else ''}[/dim]")
+
+            # Batch processing
+            batch_size = self.cfg.doc_per_step
+            for batch_start in range(0, len(to_doc), batch_size):
+                batch = to_doc[batch_start:batch_start + batch_size]
+                batch_update = update_mode and all(d.has_kdoc for d in batch)
+
+                # Save original for guardrail
+                current_source = path.read_text(errors="replace")
+                if rel not in all_changed:
+                    all_changed[rel] = source  # original before any changes
+
+                messages = build_doc_messages(
+                    rel, current_source, batch, style,
+                    notes_text=notes_text, update_mode=batch_update,
+                )
+                text = self._call_model(messages)
+                if text is None:
+                    continue
+
+                # Parse and apply SEARCH/REPLACE blocks
+                blocks, problems = parse_edit_blocks(text, default_path=rel)
+                if not blocks:
+                    continue
+
+                # Apply blocks
+                batch_changed = {}  # type: Dict[str, Optional[str]]
+                errors = self._apply(blocks, batch_changed)
+                if errors:
+                    for fix_round in range(self.cfg.doc_max_fix):
+                        feedback = "\n\n".join(errors)
+                        feedback += ("\n\nFix the failed SEARCH/REPLACE blocks above. Only resend "
+                                     "the blocks that failed. Copy the SEARCH lines exactly.")
+                        retry_msgs = messages + [
+                            {"role": "assistant", "content": text},
+                            {"role": "user", "content": feedback},
+                        ]
+                        text = self._call_model(retry_msgs)
+                        if text is None:
+                            break
+                        blocks, _ = parse_edit_blocks(text, default_path=rel)
+                        if not blocks:
+                            break
+                        errors = self._apply(blocks, batch_changed)
+                        if not errors:
+                            break
+
+                if not batch_changed:
+                    continue
+
+                # Guardrail: verify only comments changed
+                new_source = path.read_text(errors="replace")
+                diff_line = verify_code_unchanged(current_source, new_source)
+                if diff_line is not None:
+                    console.print(f"[red]Code change detected at line {diff_line} in {rel}. "
+                                   f"Reverting batch.[/red]")
+                    path.write_text(current_source)
+                    code_verified = False
+                    continue
+
+                # Verify KDoc balanced
+                unmatched = verify_kdoc_balanced(new_source)
+                if unmatched is not None:
+                    console.print(f"[red]Unmatched /** at line {unmatched} in {rel}. "
+                                   f"Reverting batch.[/red]")
+                    path.write_text(current_source)
+                    code_verified = False
+                    continue
+
+                if batch_update:
+                    total_updated += len(batch)
+                else:
+                    total_documented += len(batch)
+
+            if rel in all_changed:
+                new_content = path.read_text(errors="replace")
+                if new_content != all_changed[rel]:
+                    files_changed += 1
+
+        # One undo snapshot for the whole command
+        if all_changed:
+            self.undo_stack.append(all_changed)
+            self.last_diffs = []
+            for rel, old in all_changed.items():
+                new = (self.root / rel).read_text(errors="replace") if (self.root / rel).exists() else ""
+                d = unified_diff(rel, old or "", new)
+                if d:
+                    self.last_diffs.append(d)
+            if self.repo_map is not None:
+                self._all_files = None
+
+        report = format_doc_report(
+            total_documented, files_changed, total_skipped_existing,
+            total_skipped_override, total_updated, code_verified,
+        )
+        console.print(f"\n[green]{report}[/green]")
+
+        self.history.append({"role": "user", "content": f"/doc {target}"})
+        self.history.append({"role": "assistant", "content": report})
+
     # ---- commands -------------------------------------------------------------------------
 
     def undo(self) -> None:
@@ -1110,6 +1299,8 @@ def main(
     init_notes: bool = typer.Option(False, "--init-notes", help="Generate AGENT.md project notes."),
     review: Optional[str] = typer.Option(None, "--review", help="Review changes and exit. Targets: staged, <branch>, <file>."),
     test_gen: Optional[str] = typer.Option(None, "--test-gen", help="Generate tests for a Kotlin class and exit."),
+    doc: Optional[str] = typer.Option(None, "--doc", help="Add KDoc to a target (class, file, folder) and exit."),
+    doc_update: bool = typer.Option(False, "--doc-update", help="Update outdated KDoc instead of adding new."),
 ):
     cfg = Config(workdir=workdir.resolve(), auto_approve=yes)
     if model:
@@ -1135,6 +1326,10 @@ def main(
         tg_target = parts[0] if parts else ""
         tg_method = parts[1] if len(parts) > 1 else ""
         coder.test_gen(tg_target, tg_method, auto_accept=yes)
+        return
+
+    if doc is not None:
+        coder.doc_gen(doc, update_mode=doc_update)
         return
 
     if message:
@@ -1281,6 +1476,16 @@ def main(
                     console.print("[yellow]Usage: /test-gen <class|file> [method][/yellow]")
                 else:
                     coder.test_gen(tg_target, tg_method)
+            elif cmd == "/doc":
+                if not arg:
+                    console.print("[yellow]Usage: /doc <class|file|folder> [--update][/yellow]")
+                else:
+                    doc_update = "--update" in arg
+                    doc_target = arg.replace("--update", "").strip()
+                    if doc_target:
+                        coder.doc_gen(doc_target, update_mode=doc_update)
+                    else:
+                        console.print("[yellow]Usage: /doc <class|file|folder> [--update][/yellow]")
             elif cmd == "/review":
                 coder.review(arg)
             elif cmd == "/notes":

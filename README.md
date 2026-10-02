@@ -28,8 +28,8 @@ Env: AGENT_BASE_URL, AGENT_MODEL, AGENT_API_KEY, AGENT_MAX_TOKENS,
 AGENT_TEMPERATURE, AGENT_TIMEOUT, AGENT_MAX_TURNS,
 AGENT_DEBUG=1 (print raw server responses), AGENT_STREAM (default 1),
 AGENT_RETRIES (default 3, retries 429/502/503/504).
-See sections below for AGENT_LINT_*, AGENT_TEST_*, AGENT_NOTES_*, and
-AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
+See sections below for AGENT_LINT_*, AGENT_TEST_*, AGENT_NOTES_*,
+AGENT_DOC_*, and AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
 
 ## How tool calling works without server support
 1. System prompt lists tools and the <tool_call>{json}</tool_call> format.
@@ -199,6 +199,30 @@ coroutines-test, Turbine, Truth, assertk, Robolectric, and arch-testing.
     AGENT_TESTGEN_METHODS_PER_STEP=4    methods per generation batch
     AGENT_TESTGEN_PLAN=1                ask to approve the plan (0 = auto-accept)
     AGENT_TESTGEN_ALLOW_GRADLE_EDIT=0   allow adding missing test dependencies
+
+## KDoc generation (`/doc`)
+Add KDoc to undocumented Kotlin declarations. Reads function bodies and generates
+accurate descriptions using SEARCH/REPLACE blocks, then verifies that only comments
+changed (no code modifications).
+
+    /doc ClassName                 class by simple name
+    /doc path/to/File.kt           specific file
+    /doc feature/                  all Kotlin files in a folder (>10 asks confirmation)
+    /doc --update ClassName        fix outdated @param/@return in existing KDoc
+    coder --doc "ClassName"        one-shot from command line
+    coder --doc-update --doc "ClassName"  update mode from CLI
+
+What gets documented: classes, interfaces, objects, enums, functions. Skipped:
+private declarations, overrides, test files, generated code, already-documented
+(unless `--update`). Properties are skipped unless `AGENT_DOC_PROPERTIES=1`.
+
+Style detection: samples up to 20 existing KDoc blocks to detect tag usage
+(@param/@return vs prose), summary style (third-person vs imperative), and line width.
+
+    AGENT_DOC_PROPERTIES=0        # include val/var (default: off)
+    AGENT_DOC_VISIBILITY=internal # public|internal (default: internal)
+    AGENT_DOC_PER_STEP=8          # declarations per LLM batch
+    AGENT_DOC_MAX_FIX=2           # fix rounds for failed edit blocks
 
 ## Repo map
 Both commands index the codebase into a ranked outline (files, classes,
