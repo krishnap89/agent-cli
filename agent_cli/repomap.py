@@ -6,9 +6,9 @@ How it works
    numbers + signatures) and the set of identifiers the file uses.
    Python uses the ast module; other languages use simple regex patterns.
    Results are cached in .agent-cache/ and only changed files are re-parsed.
-3. Rank: a symbol matters if many OTHER files use it. A file's score is the
-   sum of its symbols' scores. If a query is given, files and symbols whose
-   names or paths match the query words are boosted heavily.
+3. Build a file→file dependency graph: an edge from A→B means A references a
+   symbol defined in B.  Run iterative PageRank on this graph so files that
+   are depended on by many important files bubble up.
 4. Render the top files and their top symbols until the character budget is
    used up, e.g.
 
@@ -25,9 +25,9 @@ import re
 import subprocess
 from collections import Counter, defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-CACHE_VERSION = 1
+CACHE_VERSION = 2
 MAX_FILE_BYTES = 500_000
 SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", "env",
@@ -111,10 +111,61 @@ def _python_defs(source: str) -> List[list]:
                 if child.returns is not None:
                     sig += f" -> {ast.unparse(child.returns)}"
                 defs.append([child.lineno, depth, "def", child.name, sig])
-                # don't descend into function bodies (nested helpers are noise)
 
     visit(tree, 0)
     return defs
+
+
+def _python_refs(source: str) -> Set[str]:
+    """Extract referenced names from Python source: imports + attribute access + calls."""
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return set(IDENT_RE.findall(source))
+    refs: Set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                refs.add(alias.name)
+            parts = node.module.split(".")
+            refs.update(parts)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                refs.add(alias.name.split(".")[-1])
+        elif isinstance(node, ast.Name):
+            refs.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            refs.add(node.attr)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            refs.add(node.func.id)
+
+    return refs
+
+
+# Patterns for extracting references (imports, type usage) from non-Python files
+_IMPORT_PATTERNS = {
+    ".kt": re.compile(r'^\s*import\s+[\w.]+\.(\w+)', re.MULTILINE),
+    ".java": re.compile(r'^\s*import\s+[\w.]+\.(\w+)\s*;', re.MULTILINE),
+    ".go": re.compile(r'^\s*"[\w/]+/(\w+)"', re.MULTILINE),
+    ".rs": re.compile(r'^\s*use\s+[\w:]+::(\w+)', re.MULTILINE),
+    ".swift": re.compile(r'^\s*import\s+(\w+)', re.MULTILINE),
+}
+# Type annotation / usage patterns (captures class/type names used as types)
+_TYPE_USE_RE = re.compile(r':\s*([A-Z][A-Za-z0-9_]*)')
+_CALL_RE = re.compile(r'\b([A-Z][A-Za-z0-9_]*)\s*[(<]')
+
+
+def _extract_refs(source: str, ext: str) -> Set[str]:
+    """Extract referenced symbols from source: imports, type annotations, calls."""
+    refs: Set[str] = set()
+    import_re = _IMPORT_PATTERNS.get(ext)
+    if import_re:
+        refs.update(import_re.findall(source))
+    refs.update(_TYPE_USE_RE.findall(source))
+    refs.update(_CALL_RE.findall(source))
+    refs.update(IDENT_RE.findall(source))
+    return refs
 
 
 def _regex_defs(source: str, ext: str) -> List[list]:
@@ -122,7 +173,8 @@ def _regex_defs(source: str, ext: str) -> List[list]:
     if not patterns:
         return []
     defs = []
-    for lineno, line in enumerate(source.splitlines(), 1):
+    lines = source.splitlines()
+    for lineno, line in enumerate(lines, 1):
         if len(line) > 300:
             continue
         for kind, rx in patterns:
@@ -130,13 +182,20 @@ def _regex_defs(source: str, ext: str) -> List[list]:
             if m and m.group(1) not in NOT_METHODS:
                 indent = len(line) - len(line.lstrip())
                 sig = line.strip().rstrip("{").strip()
-                defs.append([lineno, min(indent // 2, 3), kind, m.group(1), sig[:150]])
+                # For methods/functions, try to capture multi-line signatures
+                if kind in ("def", "method") and sig.count("(") > sig.count(")"):
+                    for j in range(lineno, min(lineno + 5, len(lines))):
+                        sig += " " + lines[j].strip()
+                        if sig.count("(") <= sig.count(")"):
+                            break
+                    sig = sig.rstrip("{").strip()
+                defs.append([lineno, min(indent // 2, 3), kind, m.group(1), sig[:200]])
                 break
     return defs
 
 
 def extract(path: Path) -> Optional[dict]:
-    """Return {"defs": [...], "idents": [...]} for one file, or None to skip it."""
+    """Return {"defs": [...], "refs": [...]} for one file, or None to skip it."""
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
             return None
@@ -149,9 +208,13 @@ def extract(path: Path) -> Optional[dict]:
     if lines and sum(len(l) for l in lines[:50]) / min(len(lines), 50) > 300:
         return None  # minified / generated
     ext = path.suffix.lower()
-    defs = _python_defs(source) if ext == ".py" else _regex_defs(source, ext)
-    idents = sorted(set(IDENT_RE.findall(source)))
-    return {"defs": defs, "idents": idents}
+    if ext == ".py":
+        defs = _python_defs(source)
+        refs = sorted(_python_refs(source))
+    else:
+        defs = _regex_defs(source, ext)
+        refs = sorted(_extract_refs(source, ext))
+    return {"defs": defs, "refs": refs}
 
 
 # ---- The map ------------------------------------------------------------------
@@ -177,7 +240,8 @@ class RepoMap:
         self.root = root.resolve()
         self.cache_path = (cache_dir or self.root / ".agent-cache") / "repomap.json"
         self.files: Dict[str, dict] = {}
-        self._ref_files: Dict[str, int] = {}
+        self._ref_counts: Dict[str, int] = {}
+        self._file_ranks: Dict[str, float] = {}
 
     # -- indexing --
 
@@ -223,6 +287,9 @@ class RepoMap:
             key = [st.st_mtime, st.st_size]
             entry = cache.get(rel)
             if entry and entry.get("key") == key:
+                # Migrate old cache entries that used "idents" instead of "refs"
+                if "idents" in entry and "refs" not in entry:
+                    entry["refs"] = entry.pop("idents")
                 files[rel] = entry
                 continue
             info = extract(full)
@@ -238,24 +305,81 @@ class RepoMap:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             ignore = self.cache_path.parent / ".gitignore"
             if not ignore.exists():
-                ignore.write_text("*\n")  # keep the cache out of git status
+                ignore.write_text("*\n")
             self.cache_path.write_text(json.dumps({"version": CACHE_VERSION, "files": files}))
         except OSError:
             pass
 
-        # How many files mention each identifier.
-        counts = Counter()
-        for info in files.values():
-            counts.update(info["idents"])
-        self._ref_files = counts
+        self._build_graph()
         return len(files), reparsed
+
+    # -- graph + PageRank --
+
+    def _build_graph(self) -> None:
+        """Build a file→file dependency graph and run PageRank."""
+        files = self.files
+
+        # Map: symbol name → set of files that define it
+        sym_to_definers: Dict[str, Set[str]] = defaultdict(set)
+        for rel, info in files.items():
+            for d in info["defs"]:
+                sym_to_definers[d[3]].add(rel)
+
+        # How many files reference each symbol (for per-symbol scoring)
+        ref_counts: Dict[str, int] = Counter()
+        for info in files.values():
+            ref_counts.update(set(info.get("refs", info.get("idents", []))))
+        self._ref_counts = ref_counts
+
+        # Build adjacency: edges[A] = {B: weight} means A references symbols defined in B
+        edges: Dict[str, Dict[str, float]] = defaultdict(lambda: defaultdict(float))
+        for rel, info in files.items():
+            file_refs = set(info.get("refs", info.get("idents", [])))
+            file_defs = {d[3] for d in info["defs"]}
+            for ref_name in file_refs:
+                if ref_name in file_defs:
+                    continue  # self-reference
+                for definer in sym_to_definers.get(ref_name, ()):
+                    if definer != rel:
+                        edges[rel][definer] += 1.0
+
+        # PageRank (iterative, damping=0.85, 20 iterations)
+        # Build reverse adjacency for O(E) per iteration instead of O(N²)
+        all_files = list(files.keys())
+        n = len(all_files)
+        if n == 0:
+            self._file_ranks = {}
+            return
+
+        damping = 0.85
+        ranks = {f: 1.0 / n for f in all_files}
+
+        out_weight: Dict[str, float] = {}
+        for f in all_files:
+            out_weight[f] = sum(edges[f].values()) if f in edges else 0.0
+
+        # reverse_edges[target] = [(source, weight)]
+        reverse_edges: Dict[str, List[Tuple[str, float]]] = defaultdict(list)
+        for src, targets in edges.items():
+            for tgt, w in targets.items():
+                reverse_edges[tgt].append((src, w))
+
+        base = (1.0 - damping) / n
+        for _ in range(20):
+            new_ranks: Dict[str, float] = {}
+            for f in all_files:
+                incoming = 0.0
+                for src, w in reverse_edges.get(f, ()):
+                    incoming += ranks[src] * w / out_weight[src]
+                new_ranks[f] = base + damping * incoming
+            ranks = new_ranks
+
+        self._file_ranks = ranks
 
     # -- ranking --
 
     def _symbol_score(self, name: str, n_definers: int) -> float:
-        # Files that use the name, minus the definer(s); log-damped so one
-        # hugely popular helper doesn't dominate; split across duplicate names.
-        refs = max(self._ref_files.get(name, 0) - n_definers, 0)
+        refs = max(self._ref_counts.get(name, 0) - n_definers, 0)
         if name.startswith("__") or name in ("main", "init", "setup", "test"):
             refs = min(refs, 1)
         return math.log1p(refs) / max(n_definers, 1)
@@ -272,12 +396,16 @@ class RepoMap:
 
         words = _split_words(query)
         focus = focus.strip("/")
-        file_scores, sym_scores = {}, {}
+        file_scores: Dict[str, float] = {}
+        sym_scores: Dict[Tuple[str, int], float] = {}
+
         for rel, info in self.files.items():
             if (focus and not rel.startswith(focus)) or (exclude and rel in exclude):
                 continue
             rel_l = rel.lower()
             path_hit = sum(1 for w in words if w in rel_l)
+
+            # Per-symbol scores
             base = match = 0.0
             for d in info["defs"]:
                 name = d[3]
@@ -288,23 +416,34 @@ class RepoMap:
                     s = s * 3 + 5 * hits
                     match += 5 * hits
                 sym_scores[(rel, d[0])] = s
+
             if words:
-                # With a query, matching files always outrank popular non-matching ones.
                 match += 15 * path_hit
                 total = match * 10 + base * 0.1 if match else base * 0.02
             else:
                 total = base
-            is_test = bool(re.search(r"(^|/)(tests?|spec|__tests__)/|(^|/)test_|_test\.|\.spec\.|\.test\.", rel_l))
+
+            # Blend in PageRank: files that many other files depend on rank higher
+            pr = self._file_ranks.get(rel, 0.0)
+            n = len(self.files)
+            pr_boost = pr * n  # normalize so average file ≈ 1.0
+            if words:
+                total += pr_boost * 2  # mild boost when querying
+            else:
+                total = total * 0.6 + pr_boost * 5  # strong influence without query
+
+            is_test = bool(re.search(
+                r"(^|/)(tests?|spec|__tests__)/|(^|/)test_|_test\.|\.spec\.|\.test\.", rel_l))
             if is_test and "test" not in words:
                 total *= 0.2
+
             file_scores[rel] = total + 0.01 * min(len(info["defs"]), 20)
 
-        ranked = [r for r in sorted(file_scores, key=lambda r: -file_scores[r]) if file_scores[r] > 0]
+        ranked = [r for r in sorted(file_scores, key=lambda r: -file_scores[r])
+                  if file_scores[r] > 0]
         out, used, shown = [], 0, 0
         for rel in ranked:
             defs = self.files[rel]["defs"]
-            # Files matching the query get more detail; others a short summary,
-            # so the map covers many files instead of one.
             matched = words and (any(w in rel.lower() for w in words) or any(
                 sym_scores.get((rel, d[0]), 0) >= 5 for d in defs))
             if matched:
@@ -316,7 +455,6 @@ class RepoMap:
             keep = {d[0] for d in best}
             block = [rel]
             for d in defs:
-                # keep the best symbols, plus the classes that contain them
                 if d[0] in keep or (d[2] == "class" and any(k > d[0] for k in keep)):
                     sig = d[4] if len(d[4]) <= 110 else d[4][:107] + "..."
                     block.append(f"{d[0]:>6} {'  ' * d[1]}{sig}")
@@ -324,11 +462,11 @@ class RepoMap:
                 block.append(f"{'':>6} ... {len(defs) - len(keep)} more (use outline)")
             text = "\n".join(block)
             if used + len(text) > budget:
-                if shown == 0:  # show at least part of the top file, cut at a line
+                if shown == 0:
                     out.append(text[:budget].rsplit("\n", 1)[0])
                     shown = 1
                 if budget - used > 200:
-                    continue  # a smaller file further down may still fit
+                    continue
                 break
             out.append(text)
             used += len(text) + 1
