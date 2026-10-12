@@ -18,6 +18,7 @@ How it works
          45 def load_rates(path)
 """
 import ast
+import heapq
 import json
 import math
 import os
@@ -499,6 +500,59 @@ class RepoMap:
             refs = min(refs, 1)
         return math.log1p(refs) / max(n_definers, 1)
 
+    # Max files to fully score when no query narrows the set
+    _TIER1_LIMIT = 200
+
+    def _candidates(self, words: List[str], focus: str,
+                    exclude: Optional[set]) -> List[str]:
+        """Return the subset of files worth full scoring.
+
+        With a query: files whose path or symbol names overlap with any query
+        word are tier-1 (always scored).  The rest are tier-2: only the top
+        _TIER1_LIMIT by PageRank are scored — the long tail is skipped.
+
+        Without a query: the top _TIER1_LIMIT by PageRank, which already
+        captures the most-depended-on files.
+        """
+        all_rels = []
+        for rel in self.files:
+            if focus and not rel.startswith(focus):
+                continue
+            if exclude and rel in exclude:
+                continue
+            all_rels.append(rel)
+
+        if len(all_rels) <= self._TIER1_LIMIT:
+            return all_rels
+
+        if not words:
+            return heapq.nlargest(
+                self._TIER1_LIMIT, all_rels,
+                key=lambda r: self._file_ranks.get(r, 0.0),
+            )
+
+        word_set = set(words)
+        tier1: List[str] = []
+        tier2: List[str] = []
+        for rel in all_rels:
+            rel_l = rel.lower()
+            if any(w in rel_l for w in word_set):
+                tier1.append(rel)
+                continue
+            sym_names = {d[3].lower() for d in self.files[rel]["defs"]}
+            if any(w in name for w in word_set for name in sym_names):
+                tier1.append(rel)
+            else:
+                tier2.append(rel)
+
+        remaining = self._TIER1_LIMIT - len(tier1)
+        if remaining > 0 and tier2:
+            tier1.extend(heapq.nlargest(
+                remaining, tier2,
+                key=lambda r: self._file_ranks.get(r, 0.0),
+            ))
+        return tier1
+
     def render(self, query: str = "", budget: int = 4000, focus: str = "",
                exclude: Optional[set] = None) -> str:
         if not self.files:
@@ -511,12 +565,15 @@ class RepoMap:
 
         words = _split_words(query)
         focus = focus.strip("/")
+
+        candidates = self._candidates(words, focus, exclude)
+
         file_scores: Dict[str, float] = {}
         sym_scores: Dict[Tuple[str, int], float] = {}
+        n = len(self.files)
 
-        for rel, info in self.files.items():
-            if (focus and not rel.startswith(focus)) or (exclude and rel in exclude):
-                continue
+        for rel in candidates:
+            info = self.files[rel]
             rel_l = rel.lower()
             path_hit = sum(1 for w in words if w in rel_l)
 
@@ -540,7 +597,6 @@ class RepoMap:
 
             # Blend in PageRank: files that many other files depend on rank higher
             pr = self._file_ranks.get(rel, 0.0)
-            n = len(self.files)
             pr_boost = pr * n  # normalize so average file ≈ 1.0
             if words:
                 total += pr_boost * 2  # mild boost when querying
