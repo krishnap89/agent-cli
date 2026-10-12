@@ -11,8 +11,9 @@ from rich.prompt import Confirm
 from agent_cli.config import Config
 from agent_cli.coder import Coder
 from agent_cli.review import (
-    collect_material, split_material_by_file, build_review_messages,
-    build_merge_messages, needs_split, _extract_files_from_diff,
+    collect_material, split_material_by_file, split_material_by_commit,
+    build_review_messages, build_merge_messages, needs_split,
+    _extract_files_from_diff,
 )
 from tests.fake_server import FakeServer
 
@@ -361,6 +362,91 @@ class TestCoderReviewIntegration(unittest.TestCase):
         coder.review("staged")
         self.assertEqual(len(self.server.requests), 0)
         td2.cleanup()
+
+
+class TestCollectCommits(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = Path(self.td.name)
+
+    def tearDown(self):
+        self.td.cleanup()
+
+    def test_commits_on_feature_branch(self):
+        """Review commits collects per-commit diffs."""
+        _git_init(self.root)
+        (self.root / "a.py").write_text("x = 1\n")
+        os.system(f"cd {self.root} && git add a.py && git commit -q -m 'add a'")
+        os.system(f"cd {self.root} && git checkout -q -b feature")
+        (self.root / "a.py").write_text("x = 2\n")
+        os.system(f"cd {self.root} && git add a.py && git commit -q -m 'change a'")
+        (self.root / "b.py").write_text("y = 1\n")
+        os.system(f"cd {self.root} && git add b.py && git commit -q -m 'add b'")
+
+        material, files, desc = collect_material(self.root, "commits")
+        self.assertIn("a.py", files)
+        self.assertIn("b.py", files)
+        self.assertIn("2 commits", desc)
+        self.assertIn("feature", desc)
+        self.assertIn("=== Commit", material)
+        self.assertIn("change a", material)
+        self.assertIn("add b", material)
+
+    def test_commits_on_main_raises(self):
+        """Error when already on main."""
+        _git_init(self.root)
+        (self.root / "a.py").write_text("x = 1\n")
+        os.system(f"cd {self.root} && git add a.py && git commit -q -m 'add a'")
+
+        with self.assertRaises(ValueError) as ctx:
+            collect_material(self.root, "commits")
+        self.assertIn("Already on main", str(ctx.exception))
+
+    def test_commits_no_commits_raises(self):
+        """Error when branch has no commits beyond base."""
+        _git_init(self.root)
+        (self.root / "a.py").write_text("x = 1\n")
+        os.system(f"cd {self.root} && git add a.py && git commit -q -m 'add a'")
+        os.system(f"cd {self.root} && git checkout -q -b feature")
+
+        with self.assertRaises(ValueError) as ctx:
+            collect_material(self.root, "commits")
+        self.assertIn("No commits", str(ctx.exception))
+
+
+class TestSplitMaterialByCommit(unittest.TestCase):
+    def test_split_commits(self):
+        material = (
+            "=== Commit abc12345: Fix bug ===\n"
+            "diff --git a/a.py b/a.py\n"
+            "+++ b/a.py\n"
+            "@@ -1 +1 @@\n"
+            "-x = 1\n"
+            "+x = 2\n"
+            "\n"
+            "=== Commit def67890: Add feature ===\n"
+            "diff --git a/b.py b/b.py\n"
+            "+++ b/b.py\n"
+            "@@ -1 +1 @@\n"
+            "-y = 1\n"
+            "+y = 2\n"
+        )
+        chunks = split_material_by_commit(material)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual(chunks[0][0], "abc12345: Fix bug")
+        self.assertEqual(chunks[1][0], "def67890: Add feature")
+        self.assertIn("+x = 2", chunks[0][1])
+        self.assertIn("+y = 2", chunks[1][1])
+
+    def test_single_commit(self):
+        material = (
+            "=== Commit abc12345: Only change ===\n"
+            "diff --git a/a.py b/a.py\n"
+            "+++ b/a.py\n"
+        )
+        chunks = split_material_by_commit(material)
+        self.assertEqual(len(chunks), 1)
+        self.assertEqual(chunks[0][0], "abc12345: Only change")
 
 
 class TestExtractFilesFromDiff(unittest.TestCase):

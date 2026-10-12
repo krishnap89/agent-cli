@@ -30,8 +30,8 @@ from .config import Config
 from .notes import find_notes, gather_init_info, load_notes, notes_exist, INIT_PROMPT
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display, Skill
 from .review import (
-    collect_material, split_material_by_file, build_review_messages,
-    build_merge_messages, needs_split, REVIEW_SYSTEM,
+    collect_material, split_material_by_file, split_material_by_commit,
+    build_review_messages, build_merge_messages, needs_split, REVIEW_SYSTEM,
 )
 from .editblock import EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
 from .input_reader import read_message
@@ -123,7 +123,7 @@ HELP = """Commands:
   /autotest on|off     toggle auto-test after edits
   /compile [all]       run Gradle compile check on modules of files in chat
   /modules             list detected modules and file-to-module mapping
-  /review [target]     review changes (uncommitted, staged, branch, files)
+  /review [target]     review changes (uncommitted, staged, commits, branch, files)
   /test-gen <class>    generate unit tests for a Kotlin class
   /doc <target>        add KDoc to Kotlin declarations (class, file, folder)
   /skills              list available skills
@@ -717,12 +717,15 @@ class Coder:
             return
 
         budget = self.cfg.context_chars
+        is_commits = target.strip() == "commits"
         split = needs_split(material, budget)
+        split_label = ", split per commit" if is_commits and split else (", split per file" if split else "")
         mat_size = len(material)
-        console.print(f"[dim]Reviewing {desc}: {mat_size:,} chars"
-                       f"{', split per file' if split else ''}[/dim]")
+        console.print(f"[dim]Reviewing {desc}: {mat_size:,} chars{split_label}[/dim]")
 
-        if split:
+        if is_commits and split:
+            review_text = self._review_split_commits(material, desc)
+        elif split:
             review_text = self._review_split(material, desc)
         else:
             review_text = self._review_single(material, desc)
@@ -761,6 +764,28 @@ class Coder:
             if text is None:
                 return None
             findings.append(f"## {fname}\n{text}")
+
+        if len(findings) == 1:
+            return findings[0]
+
+        console.print("[dim]  Merging findings...[/dim]")
+        merge_msgs = build_merge_messages(findings)
+        return self._call_model(merge_msgs)
+
+    def _review_split_commits(self, material: str, desc: str) -> Optional[str]:
+        """Review per commit, then merge."""
+        chunks = split_material_by_commit(material)
+        if not chunks:
+            return self._review_single(material, desc)
+
+        findings = []  # type: List[str]
+        for i, (header, chunk) in enumerate(chunks):
+            console.print(f"[dim]  [{i + 1}/{len(chunks)}] {header}[/dim]")
+            messages = build_review_messages(chunk, f"commit {header}")
+            text = self._call_model(messages)
+            if text is None:
+                return None
+            findings.append(f"## {header}\n{text}")
 
         if len(findings) == 1:
             return findings[0]

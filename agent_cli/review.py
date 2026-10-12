@@ -92,6 +92,8 @@ def collect_material(
         return _collect_uncommitted(root)
     if target == "staged":
         return _collect_staged(root)
+    if target == "commits":
+        return _collect_commits(root)
 
     # Check if it's file paths/globs
     expanded = _expand_file_args(root, target)
@@ -104,8 +106,8 @@ def collect_material(
 
     raise ValueError(
         f"Unknown review target: {target}\n"
-        "Use: /review (uncommitted), /review staged, /review <branch>, "
-        "or /review <file> [file]"
+        "Use: /review (uncommitted), /review staged, /review commits, "
+        "/review <branch>, or /review <file> [file]"
     )
 
 
@@ -185,6 +187,66 @@ def _collect_branch(root: Path, branch: str) -> Tuple[str, List[str], str]:
     return diff.strip(), files, desc
 
 
+def _detect_base_branch(root: Path) -> str:
+    """Detect the base branch (main or master)."""
+    for candidate in ("main", "master"):
+        if _is_branch(root, candidate):
+            return candidate
+    raise ValueError(
+        "Cannot detect base branch (tried main, master). "
+        "Use /review <branch> to specify it explicitly."
+    )
+
+
+def _collect_commits(root: Path) -> Tuple[str, List[str], str]:
+    """Collect per-commit diffs for all commits on the current branch vs base."""
+    if not _is_git_repo(root):
+        raise ValueError("Not a git repository.")
+
+    base = _detect_base_branch(root)
+
+    _, current = _run_git(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    current = current.strip()
+    if current == base:
+        raise ValueError(
+            f"Already on {base}. Switch to a feature branch first, "
+            "or use /review to review uncommitted changes."
+        )
+
+    _, log_out = _run_git(root, [
+        "log", "--reverse", "--format=%H %s", f"{base}..HEAD",
+    ])
+    if not log_out.strip():
+        raise ValueError(f"No commits on this branch beyond {base}.")
+
+    commits = []  # type: List[Tuple[str, str]]
+    for line in log_out.strip().splitlines():
+        sha, _, subject = line.partition(" ")
+        commits.append((sha.strip(), subject.strip()))
+
+    parts = []  # type: List[str]
+    all_files = []  # type: List[str]
+    for sha, subject in commits:
+        _, diff = _run_git(root, ["diff", "-U10", f"{sha}~1..{sha}"], timeout=60)
+        if not diff.strip():
+            continue
+        files = _extract_files_from_diff(diff)
+        for f in files:
+            if f not in all_files:
+                all_files.append(f)
+        header = f"=== Commit {sha[:8]}: {subject} ==="
+        parts.append(f"{header}\n{diff.strip()}")
+
+    if not parts:
+        raise ValueError(f"No diffs found in commits on this branch beyond {base}.")
+
+    material = "\n\n".join(parts)
+    n = len(commits)
+    desc = (f"{n} commit{'s' if n != 1 else ''} on {current} vs {base} "
+            f"({len(all_files)} file{'s' if len(all_files) != 1 else ''})")
+    return material, all_files, desc
+
+
 def _collect_files(root: Path, file_list: List[str]) -> Tuple[str, List[str], str]:
     """Collect whole file contents with line numbers."""
     parts = []  # type: List[str]
@@ -243,6 +305,32 @@ def split_material_by_file(material: str) -> List[Tuple[str, str]]:
 
     if current_file is not None:
         chunks.append((current_file, "\n".join(current_lines)))
+
+    return chunks
+
+
+def split_material_by_commit(material: str) -> List[Tuple[str, str]]:
+    """Split commit-delimited material into per-commit chunks.
+
+    Returns [(commit_header, chunk)] where commit_header is like
+    "abc12345: Fix the bug".
+    """
+    chunks = []  # type: List[Tuple[str, str]]
+    current_header = None  # type: Optional[str]
+    current_lines = []  # type: List[str]
+
+    for line in material.splitlines():
+        if line.startswith("=== Commit ") and line.endswith(" ==="):
+            if current_header is not None:
+                chunks.append((current_header, "\n".join(current_lines)))
+            inner = line[len("=== Commit "):-len(" ===")]
+            current_header = inner
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    if current_header is not None:
+        chunks.append((current_header, "\n".join(current_lines)))
 
     return chunks
 

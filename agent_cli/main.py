@@ -9,7 +9,7 @@ from .config import Config
 from .input_reader import read_message
 from .llm import list_models
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
-from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file
+from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
 
 app = typer.Typer(add_completion=False)
@@ -170,9 +170,10 @@ def _do_review(cfg: Config, target: str) -> None:
         console.print(f"[yellow]{e}[/yellow]")
         return
 
+    is_commits = target.strip() == "commits"
     split = needs_split(material, cfg.context_chars)
-    console.print(f"[dim]Reviewing {desc}: {len(material):,} chars"
-                   f"{', split per file' if split else ''}[/dim]")
+    split_label = ", split per commit" if is_commits and split else (", split per file" if split else "")
+    console.print(f"[dim]Reviewing {desc}: {len(material):,} chars{split_label}[/dim]")
 
     from .llm import chat as llm_chat, LLMError
 
@@ -186,9 +187,25 @@ def _do_review(cfg: Config, target: str) -> None:
             return None
         return THINK_RE.sub("", reply.content).strip()
 
-    if split:
-        chunks = split_material_by_file(material)
+    if is_commits and split:
+        commit_chunks = split_material_by_commit(material)
         findings = []  # type: List[str]
+        for i, (header, chunk) in enumerate(commit_chunks):
+            console.print(f"[dim]  [{i + 1}/{len(commit_chunks)}] {header}[/dim]")
+            msgs = build_review_messages(chunk, f"commit {header}")
+            text = _call(msgs)
+            if text is None:
+                return
+            findings.append(f"## {header}\n{text}")
+        if len(findings) > 1:
+            console.print("[dim]  Merging findings...[/dim]")
+            merge_msgs = build_merge_messages(findings)
+            review_text = _call(merge_msgs)
+        else:
+            review_text = findings[0] if findings else None
+    elif split:
+        chunks = split_material_by_file(material)
+        findings = []
         for i, (fname, chunk) in enumerate(chunks):
             console.print(f"[dim]  [{i + 1}/{len(chunks)}] {fname}[/dim]")
             msgs = build_review_messages(chunk, fname)
