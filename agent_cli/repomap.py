@@ -27,7 +27,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-CACHE_VERSION = 2
+CACHE_VERSION = 4
 MAX_FILE_BYTES = 500_000
 SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", "env",
@@ -51,13 +51,28 @@ _JS = [
     ("type", r"^\s*(?:export\s+)?(?:interface|type|enum)\s+([A-Za-z_$][\w$]*)"),
     ("method", r"^\s+(?:public\s+|private\s+|protected\s+|static\s+|async\s+|readonly\s+)*([A-Za-z_$][\w$]*)\s*\([^;]*\)\s*(?::\s*[^{=]+)?\{\s*$"),
 ]
-_JAVA_LIKE = [
-    ("class", r"^\s*(?:public|private|protected|internal|abstract|final|static|sealed|partial|data|open|\s)*(?:class|interface|enum|record|struct|object)\s+([A-Za-z_]\w*)"),
-    ("method", r"^\s*(?:public|private|protected|internal|static|final|abstract|override|virtual|async|synchronized|suspend|fun|\s)+[\w<>\[\],.? ]*?\b([A-Za-z_]\w*)\s*\([^;]*$"),
+_JAVA = [
+    ("class", r"^\s*(?:public|private|protected|abstract|final|static|sealed|strictfp|\s)*@?(?:interface|class|enum|record)\s+([A-Za-z_]\w*)"),
+    ("method", r"^\s*(?:@\w+\s+)*(?:public|private|protected|static|final|abstract|default|synchronized|native)\s[\w<>\[\],.? ]*?\b([A-Za-z_]\w*)\s*\("),
+    ("method", r"^[ \t]+[\w<>\[\],.? ]+\b([A-Za-z_]\w*)\s*\([^=]*$"),
+]
+_KOTLIN = [
+    ("class", r"^\s*(?:public|private|protected|internal|abstract|final|sealed|open|data|inner|value|annotation|actual|expect|\s)*(?:enum\s+)?(?:class|interface|object)\s+([A-Za-z_]\w*)"),
+    ("def", r"^\s*(?:@\w+\s+)*(?:public|private|protected|internal|actual|expect|inline|infix|operator|tailrec|external|\s)*(?:override\s+)?(?:suspend\s+)?fun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\("),
+]
+_SCALA = [
+    ("class", r"^\s*(?:sealed\s+|abstract\s+|final\s+|implicit\s+|lazy\s+)*(?:case\s+)?(?:class|trait|object)\s+([A-Za-z_]\w*)"),
+    ("def", r"^\s*(?:private(?:\[\w+\])?\s+|protected(?:\[\w+\])?\s+)?(?:override\s+)?(?:final\s+)?(?:implicit\s+)?(?:lazy\s+)?def\s+([A-Za-z_]\w*[?!]?)"),
+    ("type", r"^\s*(?:private(?:\[\w+\])?\s+|protected(?:\[\w+\])?\s+)?type\s+([A-Za-z_]\w*)"),
+]
+_CS = [
+    ("class", r"^\s*(?:public|private|protected|internal|abstract|sealed|static|partial|\s)*(?:class|interface|enum|record|struct)\s+([A-Za-z_]\w*)"),
+    ("method", r"^\s*(?:\[\w+[^]]*\]\s*)*(?:public|private|protected|internal|static|abstract|override|virtual|async|sealed|new|extern)\s[\w<>\[\],.? ]*?\b([A-Za-z_]\w*)\s*\("),
+    ("method", r"^[ \t]+[\w<>\[\],.? ]+\b([A-Za-z_]\w*)\s*\([^=]*$"),
 ]
 LANG_PATTERNS = {
     ".js": _JS, ".jsx": _JS, ".ts": _JS, ".tsx": _JS, ".mjs": _JS, ".cjs": _JS, ".vue": _JS,
-    ".java": _JAVA_LIKE, ".cs": _JAVA_LIKE, ".kt": _JAVA_LIKE, ".scala": _JAVA_LIKE,
+    ".java": _JAVA, ".kt": _KOTLIN, ".scala": _SCALA, ".cs": _CS,
     ".go": [
         ("def", r"^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*[\[(]"),
         ("type", r"^type\s+([A-Za-z_]\w*)\s+"),
@@ -86,6 +101,10 @@ LANG_PATTERNS = {
 }
 LANG_PATTERNS = {ext: [(k, re.compile(p)) for k, p in pats] for ext, pats in LANG_PATTERNS.items()}
 NOT_METHODS = {"if", "for", "while", "switch", "catch", "return", "function", "else", "new", "sizeof", "elif"}
+_STMT_KEYWORDS = re.compile(
+    r"^\s*(?:return|throw|new|if|for|while|switch|catch|else|super|this|assert|"
+    r"var|val|let|const|yield|await|delete|typeof|instanceof)\b"
+)
 
 
 # ---- Symbol extraction --------------------------------------------------------
@@ -143,6 +162,99 @@ def _python_refs(source: str) -> Set[str]:
     return refs
 
 
+# ---- Tree-sitter Kotlin extraction --------------------------------------------
+
+try:
+    import tree_sitter as _ts
+    import tree_sitter_kotlin as _tskotlin
+    _KT_LANG = _ts.Language(_tskotlin.language())
+    _kt_parser = _ts.Parser(_KT_LANG)
+except ImportError:
+    _kt_parser = None
+
+_KT_BODY_TYPES = frozenset({"class_body", "enum_class_body"})
+
+
+def _kt_node_name(node) -> Optional[str]:
+    """Extract the name from a Kotlin declaration node."""
+    for child in node.children:
+        if child.type in ("identifier", "simple_identifier", "type_identifier"):
+            return child.text.decode()
+        if child.type == "variable_declaration":
+            for sub in child.children:
+                if sub.type in ("identifier", "simple_identifier"):
+                    return sub.text.decode()
+    return None
+
+
+def _kt_signature(node, source_bytes: bytes) -> str:
+    """Build a one-line signature, stripping the body."""
+    for child in node.children:
+        if child.type in _KT_BODY_TYPES | {"function_body"}:
+            sig = source_bytes[node.start_byte:child.start_byte].decode(errors="replace")
+            return " ".join(sig.split())[:200]
+    sig = node.text.decode(errors="replace")
+    return " ".join(sig.split())[:200]
+
+
+def _kt_defs(source: str) -> List[list]:
+    """Extract definitions from Kotlin source via tree-sitter."""
+    if _kt_parser is None:
+        return _regex_defs(source, ".kt")
+    src = source.encode()
+    tree = _kt_parser.parse(src)
+    defs: List[list] = []
+
+    def visit(node, depth: int):
+        for child in node.children:
+            if child.type in ("class_declaration", "object_declaration"):
+                name = _kt_node_name(child)
+                if name:
+                    sig = _kt_signature(child, src)
+                    defs.append([child.start_point.row + 1, depth, "class", name, sig])
+                for sub in child.children:
+                    if sub.type in _KT_BODY_TYPES:
+                        visit(sub, depth + 1)
+            elif child.type == "companion_object":
+                for sub in child.children:
+                    if sub.type in _KT_BODY_TYPES:
+                        visit(sub, depth + 1)
+            elif child.type == "function_declaration":
+                name = _kt_node_name(child)
+                if name:
+                    sig = _kt_signature(child, src)
+                    defs.append([child.start_point.row + 1, depth, "def", name, sig])
+            elif child.type == "property_declaration":
+                name = _kt_node_name(child)
+                if name and not name.isupper():
+                    sig = _kt_signature(child, src)
+                    defs.append([child.start_point.row + 1, depth, "def", name, sig])
+
+    visit(tree.root_node, 0)
+    return defs
+
+
+def _kt_refs(source: str) -> Set[str]:
+    """Extract referenced identifiers from Kotlin source via tree-sitter."""
+    if _kt_parser is None:
+        return _extract_refs(source, ".kt")
+    src = source.encode()
+    tree = _kt_parser.parse(src)
+    refs: Set[str] = set()
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type == "identifier" and node.child_count == 0:
+            refs.add(node.text.decode())
+        elif node.type == "import_header":
+            for child in node.children:
+                if child.type == "identifier":
+                    last = child.text.decode().rsplit(".", 1)[-1]
+                    refs.add(last)
+        stack.extend(node.children)
+    return refs
+
+
 # Patterns for extracting references (imports, type usage) from non-Python files
 _IMPORT_PATTERNS = {
     ".kt": re.compile(r'^\s*import\s+[\w.]+\.(\w+)', re.MULTILINE),
@@ -179,7 +291,7 @@ def _regex_defs(source: str, ext: str) -> List[list]:
             continue
         for kind, rx in patterns:
             m = rx.match(line)
-            if m and m.group(1) not in NOT_METHODS:
+            if m and m.group(1) not in NOT_METHODS and not _STMT_KEYWORDS.match(line):
                 indent = len(line) - len(line.lstrip())
                 sig = line.strip().rstrip("{").strip()
                 # For methods/functions, try to capture multi-line signatures
@@ -208,7 +320,10 @@ def extract(path: Path) -> Optional[dict]:
     if lines and sum(len(l) for l in lines[:50]) / min(len(lines), 50) > 300:
         return None  # minified / generated
     ext = path.suffix.lower()
-    if ext == ".py":
+    if ext == ".kt":
+        defs = _kt_defs(source)
+        refs = sorted(_kt_refs(source))
+    elif ext == ".py":
         defs = _python_defs(source)
         refs = sorted(_python_refs(source))
     else:
