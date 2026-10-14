@@ -96,8 +96,9 @@ LANG_PATTERNS = {
     ".cpp": [("class", r"^\s*(?:class|struct)\s+([A-Za-z_]\w*)"), ("def", r"^[A-Za-z_][\w\s\*&:<>,]*?\b([A-Za-z_][\w:]*)\s*\([^;]*$")],
     ".hpp": [("class", r"^\s*(?:class|struct)\s+([A-Za-z_]\w*)")],
     ".swift": [
-        ("class", r"^\s*(?:public\s+|private\s+|open\s+|final\s+)*(?:class|struct|enum|protocol|extension)\s+([A-Za-z_]\w*)"),
-        ("def", r"^\s*(?:public\s+|private\s+|open\s+|static\s+|override\s+)*func\s+([A-Za-z_]\w*)"),
+        ("class", r"^\s*(?:@\w+\s+)*(?:public|private|fileprivate|internal|open|final|indirect|\s)*(?:class|struct|enum|protocol|actor)\s+([A-Za-z_]\w*)"),
+        ("class", r"^\s*(?:public\s+|private\s+|fileprivate\s+|internal\s+)?extension\s+([A-Za-z_]\w*)"),
+        ("def", r"^\s*(?:@\w+\s+)*(?:public|private|fileprivate|internal|open|static|class|override|final|mutating|nonmutating|\s)*func\s+([A-Za-z_]\w*)"),
     ],
 }
 LANG_PATTERNS = {ext: [(k, re.compile(p)) for k, p in pats] for ext, pats in LANG_PATTERNS.items()}
@@ -256,6 +257,108 @@ def _kt_refs(source: str) -> Set[str]:
     return refs
 
 
+# ---- Tree-sitter Swift extraction --------------------------------------------
+
+try:
+    import tree_sitter_swift as _tsswift
+    _SWIFT_LANG = _ts.Language(_tsswift.language())
+    _swift_parser = _ts.Parser(_SWIFT_LANG)
+except (ImportError, NameError):
+    _swift_parser = None
+
+_SWIFT_BODY_TYPES = frozenset({"class_body", "enum_class_body"})
+
+
+def _swift_node_name(node) -> Optional[str]:
+    """Extract the name from a Swift declaration node."""
+    for child in node.children:
+        if child.type == "type_identifier":
+            return child.text.decode()
+        if child.type == "simple_identifier":
+            return child.text.decode()
+    if node.type == "class_declaration":
+        for child in node.children:
+            if child.type == "user_type":
+                for sub in child.children:
+                    if sub.type == "type_identifier":
+                        return sub.text.decode()
+    return None
+
+
+def _swift_signature(node, source_bytes: bytes) -> str:
+    """Build a one-line signature, stripping the body."""
+    for child in node.children:
+        if child.type in _SWIFT_BODY_TYPES | {"function_body"}:
+            sig = source_bytes[node.start_byte:child.start_byte].decode(errors="replace")
+            return " ".join(sig.split())[:200]
+    sig = node.text.decode(errors="replace")
+    return " ".join(sig.split())[:200]
+
+
+def _swift_defs(source: str) -> List[list]:
+    """Extract definitions from Swift source via tree-sitter."""
+    if _swift_parser is None:
+        return _regex_defs(source, ".swift")
+    src = source.encode()
+    tree = _swift_parser.parse(src)
+    defs: List[list] = []
+
+    def visit(node, depth: int):
+        for child in node.children:
+            if child.type == "class_declaration":
+                name = _swift_node_name(child)
+                if name:
+                    sig = _swift_signature(child, src)
+                    defs.append([child.start_point.row + 1, depth, "class", name, sig])
+                for sub in child.children:
+                    if sub.type in _SWIFT_BODY_TYPES:
+                        visit(sub, depth + 1)
+            elif child.type == "protocol_declaration":
+                name = _swift_node_name(child)
+                if name:
+                    sig = _swift_signature(child, src)
+                    defs.append([child.start_point.row + 1, depth, "class", name, sig])
+                for sub in child.children:
+                    if sub.type == "protocol_body":
+                        visit(sub, depth + 1)
+            elif child.type in ("function_declaration", "protocol_function_declaration"):
+                name = _swift_node_name(child)
+                if name:
+                    sig = _swift_signature(child, src)
+                    defs.append([child.start_point.row + 1, depth, "def", name, sig])
+            elif child.type == "property_declaration":
+                for sub in child.children:
+                    if sub.type == "pattern":
+                        pname = sub.text.decode()
+                        if not pname.isupper():
+                            sig = _swift_signature(child, src)
+                            defs.append([child.start_point.row + 1, depth, "def", pname, sig])
+                        break
+
+    visit(tree.root_node, 0)
+    return defs
+
+
+def _swift_refs(source: str) -> Set[str]:
+    """Extract referenced identifiers from Swift source via tree-sitter."""
+    if _swift_parser is None:
+        return _extract_refs(source, ".swift")
+    src = source.encode()
+    tree = _swift_parser.parse(src)
+    refs: Set[str] = set()
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type in ("simple_identifier", "type_identifier") and node.child_count == 0:
+            refs.add(node.text.decode())
+        elif node.type == "import_declaration":
+            for child in node.children:
+                if child.type == "identifier":
+                    refs.add(child.text.decode())
+        stack.extend(node.children)
+    return refs
+
+
 # Patterns for extracting references (imports, type usage) from non-Python files
 _IMPORT_PATTERNS = {
     ".kt": re.compile(r'^\s*import\s+[\w.]+\.(\w+)', re.MULTILINE),
@@ -324,6 +427,9 @@ def extract(path: Path) -> Optional[dict]:
     if ext == ".kt":
         defs = _kt_defs(source)
         refs = sorted(_kt_refs(source))
+    elif ext == ".swift":
+        defs = _swift_defs(source)
+        refs = sorted(_swift_refs(source))
     elif ext == ".py":
         defs = _python_defs(source)
         refs = sorted(_python_refs(source))
