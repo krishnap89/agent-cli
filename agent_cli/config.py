@@ -79,6 +79,7 @@ Rules:
 - Read only what the task needs: your context is small.
 - Prefer small edits with edit_file over rewriting whole files.
 - After changing code, run tests or the program to verify when possible.
+- When asked how something works or is implemented, use tools to find and read the code first. Never answer from memory alone.
 - Keep the final answer short: what you changed and why.
 """
 

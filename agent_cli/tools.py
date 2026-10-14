@@ -86,6 +86,16 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "dependency_graph",
+        "description": "Show what a file depends on and what depends on it. "
+                       "Returns incoming and outgoing file dependencies with the shared symbols.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}},
+            "required": ["path"],
+        },
+    },
+    {
         "name": "run_command",
         "description": "Run a shell command in the working directory. Returns stdout/stderr.",
         "input_schema": {
@@ -190,6 +200,10 @@ class Tools:
             return "User denied the edit."
         p.write_text(text.replace(old_str, new_str))
         return f"Edited {path}"
+
+    def t_dependency_graph(self, path: str) -> str:
+        rel = self._resolve(path).relative_to(self.root).as_posix()
+        return self.ensure_map().deps(rel)
 
     def t_search(self, pattern: str, path: str = ".") -> str:
         p = self._resolve(path)

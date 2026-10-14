@@ -464,6 +464,8 @@ class RepoMap:
         self.files: Dict[str, dict] = {}
         self._ref_counts: Dict[str, int] = {}
         self._file_ranks: Dict[str, float] = {}
+        self._edges: Dict[str, Dict[str, float]] = {}
+        self._reverse_edges: Dict[str, List[Tuple[str, float]]] = {}
 
     # -- indexing --
 
@@ -571,6 +573,8 @@ class RepoMap:
         n = len(all_files)
         if n == 0:
             self._file_ranks = {}
+            self._edges = {}
+            self._reverse_edges = {}
             return
 
         damping = 0.85
@@ -597,6 +601,54 @@ class RepoMap:
             ranks = new_ranks
 
         self._file_ranks = ranks
+        self._edges = dict(edges)
+        self._reverse_edges = dict(reverse_edges)
+
+    # -- dependency query --
+
+    def deps(self, rel: str) -> str:
+        """Return the dependency graph for one file: what it depends on and what depends on it."""
+        if rel not in self.files:
+            return f"File not in repo map: {rel}"
+
+        outgoing = self._edges.get(rel, {})
+        incoming = {src: w for src, w in self._reverse_edges.get(rel, ())}
+
+        lines = [f"Dependencies for {rel}\n"]
+
+        if outgoing:
+            lines.append("Depends on:")
+            for target, weight in sorted(outgoing.items(), key=lambda x: -x[1]):
+                syms = self._shared_symbols(rel, target, direction="out")
+                sym_str = f"  ({', '.join(syms)})" if syms else ""
+                lines.append(f"  {target}  [{int(weight)} symbols]{sym_str}")
+        else:
+            lines.append("Depends on: (nothing)")
+
+        lines.append("")
+
+        if incoming:
+            lines.append("Depended on by:")
+            for source, weight in sorted(incoming.items(), key=lambda x: -x[1]):
+                syms = self._shared_symbols(source, rel, direction="out")
+                sym_str = f"  ({', '.join(syms)})" if syms else ""
+                lines.append(f"  {source}  [{int(weight)} symbols]{sym_str}")
+        else:
+            lines.append("Depended on by: (nothing)")
+
+        return "\n".join(lines)
+
+    def _shared_symbols(self, from_file: str, to_file: str, direction: str = "out") -> List[str]:
+        """Return symbol names that from_file references which are defined in to_file."""
+        from_info = self.files.get(from_file)
+        to_info = self.files.get(to_file)
+        if not from_info or not to_info:
+            return []
+        from_refs = set(from_info.get("refs", from_info.get("idents", [])))
+        from_defs = {d[3] for d in from_info["defs"]}
+        to_defs = {d[3] for d in to_info["defs"]}
+        shared = sorted(from_refs & to_defs - from_defs)
+        return shared[:8]
 
     # -- ranking --
 
