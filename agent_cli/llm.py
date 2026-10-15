@@ -8,6 +8,7 @@ Two features protect against 504 Gateway Timeout errors:
 - Retries: 502/503/504 and dropped connections are retried with a short wait.
 """
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -29,11 +30,22 @@ class _Retryable(Exception):
     pass
 
 
+# Control tokens that can appear once special tokens are kept.
+_CONTROL_TOKENS_RE = re.compile(r"<\|(?:im_end|im_start|endoftext|end_of_text|eot_id)\|>")
+
+
 class Reply:
-    def __init__(self, content: str, finish_reason: str, reasoning: str):
+    def __init__(self, content: str, finish_reason: str, reasoning: str,
+                 tool_calls: Optional[list] = None):
+        content = _CONTROL_TOKENS_RE.sub("", content or "")
+        if "</think>" in content and "<think>" not in content:
+            content = content.split("</think>", 1)[1]  # thinking leaked into content
         self.content = content
-        self.finish_reason = finish_reason  # "stop", "length", ...
+        self.finish_reason = finish_reason  # "stop", "length", "tool_calls", ...
         self.reasoning = reasoning          # thinking text, if the server splits it out
+        # Native tool calls, if the server's tool parser extracted them:
+        # [{"name": str, "arguments": dict or str}]
+        self.tool_calls = tool_calls or []
 
 
 def _headers(cfg: Config) -> dict:
@@ -76,6 +88,15 @@ def _chat_once(cfg: Config, messages: list, stop, on_progress: ProgressFn) -> Re
     }
     if stop:
         payload["stop"] = stop
+    if cfg.keep_special_tokens:
+        payload["skip_special_tokens"] = False
+    if cfg.thinking in ("0", "1"):
+        payload["chat_template_kwargs"] = {"enable_thinking": cfg.thinking == "1"}
+    if cfg.extra_body:
+        try:
+            payload.update(json.loads(cfg.extra_body))
+        except json.JSONDecodeError as e:
+            raise LLMError(f"AGENT_EXTRA_BODY is not valid JSON: {e}") from e
 
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers=_headers(cfg), method="POST"
@@ -107,6 +128,7 @@ def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
     """Read Server-Sent Events: lines like 'data: {json}' ending with 'data: [DONE]'."""
     content, reasoning, finish = [], [], ""
     n_content = n_reasoning = 0
+    tools = {}  # index -> {"name": str, "arguments": str}, built up from deltas
     for raw in resp:
         line = raw.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
@@ -135,9 +157,21 @@ def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
                 n_reasoning += len(think)
                 if on_progress:
                     on_progress("thinking", n_reasoning)
+            for tc in delta.get("tool_calls") or []:
+                slot = tools.setdefault(tc.get("index", len(tools)), {"name": "", "arguments": ""})
+                fn = tc.get("function") or {}
+                slot["name"] += fn.get("name") or ""
+                args = fn.get("arguments")
+                if isinstance(args, dict):
+                    slot["arguments"] = args
+                elif args:
+                    slot["arguments"] += args
+                if on_progress:
+                    on_progress("calling a tool", len(tools))
             if choice.get("finish_reason"):
                 finish = choice["finish_reason"]
-    return Reply("".join(content), finish, "".join(reasoning))
+    calls = [tools[i] for i in sorted(tools)]
+    return Reply("".join(content), finish, "".join(reasoning), calls)
 
 
 def _parse_full(cfg: Config, data: dict) -> Reply:
@@ -150,6 +184,9 @@ def _parse_full(cfg: Config, data: dict) -> Reply:
             content=msg.get("content") or "",
             finish_reason=choice.get("finish_reason") or "",
             reasoning=msg.get("reasoning_content") or msg.get("reasoning") or "",
+            tool_calls=[{"name": (tc.get("function") or {}).get("name", ""),
+                         "arguments": (tc.get("function") or {}).get("arguments", "")}
+                        for tc in msg.get("tool_calls") or []],
         )
     except (KeyError, IndexError, TypeError) as e:
         raise LLMError(f"Unexpected response shape: {json.dumps(data)[:500]}") from e

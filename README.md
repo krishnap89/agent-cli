@@ -28,10 +28,24 @@ Env: AGENT_BASE_URL, AGENT_MODEL, AGENT_API_KEY, AGENT_MAX_TOKENS,
 AGENT_TEMPERATURE, AGENT_TIMEOUT, AGENT_MAX_TURNS,
 AGENT_DEBUG=1 (print raw server responses), AGENT_STREAM (default 1),
 AGENT_RETRIES (default 3, retries 429/502/503/504).
+AGENT_KEEP_SPECIAL_TOKENS (default 1: sends vLLM `skip_special_tokens: false`, so
+Qwen's `<tool_call>` markup isn't stripped; set 0 for servers that reject it),
+AGENT_THINKING (unset = server default, 0 = Qwen3 thinking off, 1 = on),
+AGENT_EXTRA_BODY (JSON merged into every request, e.g. '{"top_p": 0.8}').
 See sections below for AGENT_LINT_*, AGENT_TEST_*, AGENT_NOTES_*,
 AGENT_DOC_*, and AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
 
 ## How tool calling works without server support
+
+Tool calls are read from three places, so they work whatever the server does:
+the text (`<tool_call>{json}</tool_call>`, or the XML form newer Qwen models use:
+`<tool_call><function=search><parameter=pattern>Auth</parameter></function></tool_call>`),
+and native `tool_calls` if the server's tool parser is enabled.
+
+If the agent says "Model returned an empty reply twice" and the model "only
+produced thinking text", the tool call was generated but removed by the server.
+Keep AGENT_KEEP_SPECIAL_TOKENS=1 (the default).
+
 1. System prompt lists tools and the <tool_call>{json}</tool_call> format.
 2. Model replies with text; `stop=["<tool_response>"]` prevents it from
    inventing results.

@@ -27,6 +27,21 @@ def show(text: str) -> None:
     console.print(Markdown(safe))
 
 
+# Newer Qwen models (Qwen3-Coder, Qwen3.5+) are trained on an XML tool-call format:
+#   <tool_call><function=search><parameter=pattern>Auth</parameter></function></tool_call>
+XML_FUNC_RE = re.compile(r"<function=([\w.-]+)>(.*?)(?:</function>|$)", re.DOTALL)
+XML_PARAM_RE = re.compile(r"<parameter=([\w.-]+)>\n?(.*?)\n?(?:</parameter>|(?=<parameter=)|$)", re.DOTALL)
+
+
+def _xml_value(value: str):
+    """Parameters arrive as text; turn numbers/booleans/JSON back into values."""
+    v = value.strip()
+    try:
+        return json.loads(v)
+    except json.JSONDecodeError:
+        return v
+
+
 def render_tool_docs() -> str:
     """Turn the JSON schemas into prompt text the model can read."""
     docs = []
@@ -46,6 +61,11 @@ def parse_tool_calls(text: str) -> tuple[list[dict], list[str]]:
     calls, errors = [], []
     for raw in TOOL_CALL_RE.findall(text):
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
+        func = XML_FUNC_RE.search(raw)
+        if func and not raw.startswith("{"):
+            args = {k: _xml_value(v) for k, v in XML_PARAM_RE.findall(func.group(2))}
+            calls.append({"name": func.group(1), "arguments": args})
+            continue
         try:
             obj = json.loads(raw)
             name = obj["name"]
@@ -128,8 +148,17 @@ class Agent:
             else:
                 calls, errors = parse_tool_calls(text)
                 visible = TOOL_CALL_RE.sub("", text).strip()
+                if reply.tool_calls:
+                    # The server's own tool parser took the call out of the text.
+                    # Use it, and write it back as text so the history stays in
+                    # the format the system prompt teaches.
+                    native, native_errors = self._from_native(reply.tool_calls)
+                    calls += native
+                    errors += native_errors
+                    text = (text + "\n" + "\n".join(
+                        "<tool_call>\n" + json.dumps(c) + "\n</tool_call>" for c in native)).strip()
 
-            if not text:
+            if not text and not errors:
                 # Empty reply: explain why instead of returning silently.
                 if reply.finish_reason == "length":
                     console.print(
@@ -138,17 +167,31 @@ class Agent:
                         "Raise AGENT_MAX_TOKENS.[/yellow]"
                     )
                     return
+                thought_only = bool(reply.reasoning.strip())
                 if not nudged:
                     nudged = True
                     console.print("[dim](empty reply, asking the model again)[/dim]")
                     self.messages.append({"role": "assistant", "content": "(no reply)"})
-                    self.messages.append({"role": "user", "content":
-                        "You sent an empty reply. Please answer the question."
-                        if self.chat_only else
-                        "You sent an empty reply. Either make a tool call or answer the question."})
+                    if self.chat_only:
+                        nudge = "You sent an empty reply. Please answer the question."
+                    elif thought_only:
+                        nudge = ("You only thought about what to do. Now do it: write the tool "
+                                 "call in the <tool_call> format, or give the final answer.")
+                    else:
+                        nudge = "You sent an empty reply. Either make a tool call or answer the question."
+                    self.messages.append({"role": "user", "content": nudge})
                     continue
-                console.print("[yellow]Model returned an empty reply twice. "
-                              "Try rephrasing, or run with AGENT_DEBUG=1 to see the raw response.[/yellow]")
+                console.print("[yellow]Model returned an empty reply twice.[/yellow]")
+                if thought_only and not self.cfg.keep_special_tokens:
+                    console.print("[yellow]It only produced thinking text: the server is probably "
+                                  "stripping the tool-call markup. Unset AGENT_KEEP_SPECIAL_TOKENS "
+                                  "(or set it to 1).[/yellow]")
+                elif thought_only:
+                    console.print("[yellow]It only produced thinking text. Try AGENT_THINKING=0, "
+                                  "or AGENT_STREAM=0 AGENT_DEBUG=1 to see the raw response.[/yellow]")
+                else:
+                    console.print("[yellow]Try rephrasing, or run with AGENT_DEBUG=1 to see the "
+                                  "raw response.[/yellow]")
                 return
 
             self.messages.append({"role": "assistant", "content": text})
@@ -165,6 +208,24 @@ class Agent:
             self.messages.append({"role": "user", "content": "\n".join(results)})
 
         console.print("[red]Stopped: hit max_turns.[/red]")
+
+    @staticmethod
+    def _from_native(tool_calls: list) -> tuple[list[dict], list[str]]:
+        """Convert native tool calls ({name, arguments as JSON string or dict})."""
+        calls, errors = [], []
+        for tc in tool_calls:
+            args = tc.get("arguments") or {}
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args) if args.strip() else {}
+                except json.JSONDecodeError as e:
+                    errors.append(f"Could not parse arguments of {tc.get('name')} ({e}): {args[:200]}")
+                    continue
+            if not tc.get("name"):
+                errors.append("A tool call had no tool name.")
+                continue
+            calls.append({"name": tc["name"], "arguments": args})
+        return calls, errors
 
     def _run_tool(self, call: dict) -> str:
         name, args = call["name"], call["arguments"]
