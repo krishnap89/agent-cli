@@ -357,6 +357,21 @@ input:focus, textarea:focus, select:focus {
   background: none;
   padding: 4px;
 }
+.message.system.success { color: var(--green); }
+.message.system pre, .message.error pre {
+  text-align: left;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  margin: 6px 0 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+  color: var(--text);
+}
 .message.error {
   align-self: center;
   color: var(--red);
@@ -609,12 +624,208 @@ function setMode(m) {
   document.getElementById("modeAsk").className = m === "ask" ? "active" : "";
 }
 
+// ---- slash commands ----
+const SYNC_COMMANDS = ["lint", "test", "run", "map", "tokens", "diff"];
+const STREAM_COMMANDS = ["review"];
+const HELP_TEXT = `Available commands:
+  /lint          — run lint checks on files in chat
+  /test          — run test command (AGENT_TEST_CMD)
+  /run <cmd>     — run a shell command, show output
+  /review [target] — code review (uncommitted, staged, branch, files)
+  /map [query]   — show repo map
+  /tokens        — detailed context breakdown
+  /diff          — show last edit diffs
+  /clear         — clear chat history
+  /help          — show this help`;
+
+function parseSlashCommand(text) {
+  if (!text.startsWith("/")) return null;
+  const spaceIdx = text.indexOf(" ");
+  const cmd = spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx);
+  const arg = spaceIdx === -1 ? "" : text.slice(spaceIdx + 1).trim();
+  return {cmd, arg};
+}
+
+async function handleSlashCommand(cmd, arg) {
+  if (cmd === "help") {
+    addMessage("system", HELP_TEXT);
+    return;
+  }
+  if (cmd === "clear") {
+    await api("/api/clear", {method: "POST"});
+    document.getElementById("messages").innerHTML = "";
+    updateTokens();
+    return;
+  }
+  if (STREAM_COMMANDS.includes(cmd)) {
+    await handleStreamCommand(cmd, arg);
+    return;
+  }
+  if (!SYNC_COMMANDS.includes(cmd)) {
+    addMessage("error", "Unknown command: /" + cmd + ". Type /help for a list.");
+    return;
+  }
+
+  streaming = true;
+  document.getElementById("sendBtn").style.display = "none";
+  const msgEl = addMessage("system", "Running /" + cmd + "...");
+
+  try {
+    const resp = await api("/api/command", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({command: cmd, arg: arg}),
+    });
+    const data = await resp.json();
+
+    if (cmd === "lint") {
+      if (data.ok) {
+        msgEl.textContent = "Lint: passed ✓";
+        msgEl.className = "message system success";
+      } else {
+        msgEl.textContent = "Lint errors:";
+        const pre = document.createElement("pre");
+        pre.textContent = data.errors.join("\n\n");
+        msgEl.appendChild(pre);
+      }
+    } else if (cmd === "test") {
+      if (data.error) {
+        msgEl.textContent = data.error;
+      } else if (data.ok) {
+        msgEl.textContent = "Tests passed ✓";
+        msgEl.className = "message system success";
+      } else {
+        msgEl.textContent = "Tests failed:";
+        const pre = document.createElement("pre");
+        pre.textContent = data.output;
+        msgEl.appendChild(pre);
+      }
+    } else if (cmd === "run") {
+      const status = data.exit_code === 0 ? "exit 0" : "exit " + data.exit_code;
+      msgEl.textContent = "";
+      const pre = document.createElement("pre");
+      pre.textContent = data.output || "(no output)";
+      msgEl.appendChild(pre);
+      const dim = document.createElement("div");
+      dim.style.color = "var(--text-dim)";
+      dim.style.fontSize = "0.85em";
+      dim.textContent = status;
+      msgEl.appendChild(dim);
+    } else if (cmd === "map") {
+      if (data.error) {
+        msgEl.textContent = data.error;
+      } else {
+        msgEl.textContent = "";
+        const pre = document.createElement("pre");
+        pre.textContent = data.text;
+        msgEl.appendChild(pre);
+      }
+    } else if (cmd === "tokens") {
+      let lines = data.parts.map(p =>
+        "  ~" + String(p.tokens).padStart(6) + " tokens  " + p.name
+      );
+      lines.push("  ~" + String(data.total_tokens).padStart(6) + " tokens  TOTAL (budget ~" + data.budget_tokens + ")");
+      msgEl.textContent = "";
+      const pre = document.createElement("pre");
+      pre.textContent = lines.join("\n");
+      msgEl.appendChild(pre);
+    } else if (cmd === "diff") {
+      if (data.error) {
+        msgEl.textContent = data.error;
+      } else {
+        msgEl.textContent = "";
+        for (const d of data.diffs) {
+          msgEl.appendChild(renderDiff(d.file || d, typeof d === "string" ? d : d.diff || d));
+        }
+      }
+    }
+  } catch (e) {
+    addMessage("error", "Command error: " + e.message);
+  }
+
+  streaming = false;
+  document.getElementById("sendBtn").style.display = "";
+  updateTokens();
+}
+
+async function handleStreamCommand(cmd, arg) {
+  streaming = true;
+  document.getElementById("sendBtn").style.display = "none";
+  document.getElementById("stopBtn").style.display = "";
+
+  const msgEl = addMessage("assistant", "");
+  let contentBuf = "";
+
+  try {
+    const endpoint = cmd === "review" ? "/api/review" : "/api/chat";
+    const body = cmd === "review"
+      ? JSON.stringify({target: arg})
+      : JSON.stringify({message: "/" + cmd + " " + arg, mode: mode});
+
+    const resp = await api(endpoint, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: body,
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const raw = line.slice(6).trim();
+        if (!raw) continue;
+        let ev;
+        try { ev = JSON.parse(raw); } catch { continue; }
+
+        if (ev.type === "content") {
+          contentBuf += ev.text;
+          msgEl.innerHTML = renderMarkdown(contentBuf);
+          scrollToBottom();
+        } else if (ev.type === "info") {
+          addMessage("system", ev.text);
+        } else if (ev.type === "error") {
+          addMessage("error", ev.text);
+        } else if (ev.type === "done") {
+          // review complete
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") {
+      addMessage("error", "Connection error: " + e.message);
+    }
+  }
+
+  streaming = false;
+  document.getElementById("sendBtn").style.display = "";
+  document.getElementById("stopBtn").style.display = "none";
+  updateTokens();
+  refreshChatFiles();
+}
+
 // ---- send message ----
 async function sendMessage() {
   const text = inp.value.trim();
   if (!text || streaming) return;
   inp.value = "";
   inp.style.height = "auto";
+
+  // Check for slash commands
+  const slash = parseSlashCommand(text);
+  if (slash) {
+    addMessage("user", text);
+    await handleSlashCommand(slash.cmd, slash.arg);
+    return;
+  }
 
   addMessage("user", text);
   streaming = true;

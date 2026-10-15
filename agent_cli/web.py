@@ -22,9 +22,14 @@ import typer
 
 from .config import Config
 from .coder import Coder
+from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
 from .editblock import parse_edit_blocks, unified_diff
 from .llm import LLMError, chat, Reply, list_models
 from .repomap import RepoMap
+from .review import (
+    collect_material, needs_split, split_material_by_file,
+    build_review_messages, build_merge_messages,
+)
 
 app = typer.Typer(add_completion=False)
 
@@ -359,6 +364,212 @@ class WebCoder:
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
+    # ---- slash commands ------------------------------------------------------
+
+    def run_lint(self, files=None) -> dict:
+        errors = self.coder.run_lint(files)
+        return {"ok": not errors, "errors": errors}
+
+    def run_test(self) -> dict:
+        if not self.cfg.test_cmd:
+            return {"ok": False, "error": "No test command set. Set AGENT_TEST_CMD."}
+        err = self.coder.run_test()
+        if err:
+            truncated = truncate_output(err, self.cfg.check_output_chars)
+            return {"ok": False, "output": truncated}
+        return {"ok": True}
+
+    def run_command(self, command: str) -> dict:
+        import subprocess
+        try:
+            r = subprocess.run(command, shell=True, cwd=self.coder.root,
+                               capture_output=True, text=True, timeout=600)
+            output = (r.stdout + r.stderr).strip()
+            return {"exit_code": r.returncode, "output": output[-8000:]}
+        except subprocess.TimeoutExpired:
+            return {"exit_code": -1, "output": "(timed out after 600s)"}
+
+    def repo_map(self, query: str = "") -> dict:
+        if self.coder.repo_map is None:
+            return {"ok": False, "error": "Repo map is off (AGENT_MAP=0)."}
+        self.coder.repo_map.build()
+        text = self.coder.repo_map.render(query=query, budget=self.cfg.map_chars)
+        return {"ok": True, "text": text}
+
+    def token_report(self) -> dict:
+        msgs = self.coder.build_messages("")
+        parts = []
+        parts.append(("system prompt", len(msgs[0]["content"])))
+        if self.cfg.notes_enabled:
+            from .notes import load_notes
+            _, notes_text = load_notes(self.coder.root, self.cfg.notes_file,
+                                       self.cfg.notes_chars, warn_once=False)
+            if notes_text:
+                parts.append(("project notes", len(notes_text)))
+        if self.coder.repo_map is not None and len(msgs) > 1:
+            parts.append(("repo map", len(msgs[1]["content"])))
+        for f in list(self.coder.editable) + list(self.coder.read_only):
+            parts.append((f, len(self.coder._file_block(f))))
+        parts.append(("chat history", sum(len(m["content"]) for m in self.coder.history)))
+        total = sum(n for _, n in parts)
+        budget = self.cfg.context_chars
+        return {
+            "parts": [{"name": name, "tokens": n // 4} for name, n in parts],
+            "total_tokens": total // 4,
+            "budget_tokens": budget // 4,
+        }
+
+    def show_diff(self) -> dict:
+        if not self.coder.last_diffs:
+            return {"ok": False, "error": "No edits in the last request."}
+        diffs = []
+        for d in self.coder.last_diffs:
+            fname = ""
+            for line in d.splitlines():
+                if line.startswith("+++ b/"):
+                    fname = line[6:]
+                    break
+                if line.startswith("--- a/"):
+                    fname = line[6:]
+            diffs.append({"file": fname, "diff": d})
+        return {"ok": True, "diffs": diffs}
+
+    def review(self, target: str, on_chunk, on_done, on_error):
+        if self._busy:
+            on_error("Model is already working on a request.")
+            return
+        self._cancel.clear()
+        self._busy = True
+
+        def _run():
+            try:
+                self._do_review(target, on_chunk, on_done)
+            except Exception as e:
+                on_error(str(e))
+            finally:
+                self._busy = False
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _do_review(self, target: str, on_chunk, on_done):
+        try:
+            material, files, desc = collect_material(self.coder.root, target)
+        except ValueError as e:
+            on_chunk(json.dumps({"type": "error", "text": str(e)}) + "\n")
+            on_done("", [])
+            return
+
+        budget = self.cfg.context_chars
+        split = needs_split(material, budget)
+        info = f"Reviewing {desc}: {len(material):,} chars"
+        if split:
+            info += ", split per file"
+        on_chunk(json.dumps({"type": "info", "text": info}) + "\n")
+
+        if split:
+            chunks = split_material_by_file(material)
+            if not chunks:
+                chunks = [("all", material)]
+            findings = []
+            for i, (fname, chunk) in enumerate(chunks):
+                if self._cancel.is_set():
+                    break
+                on_chunk(json.dumps({"type": "info", "text": f"[{i + 1}/{len(chunks)}] {fname}"}) + "\n")
+                messages = build_review_messages(chunk, fname)
+                text = self._call_model_blocking(messages)
+                if text:
+                    findings.append(f"## {fname}\n{text}")
+
+            if len(findings) > 1:
+                on_chunk(json.dumps({"type": "info", "text": "Merging findings..."}) + "\n")
+                messages = build_merge_messages(findings)
+                full = self._stream_model(messages, on_chunk)
+            else:
+                full = findings[0] if findings else "No findings."
+                on_chunk(json.dumps({"type": "content", "text": full}) + "\n")
+        else:
+            messages = build_review_messages(material, desc)
+            full = self._stream_model(messages, on_chunk)
+
+        self.coder.history.append({"role": "user", "content": f"Review of {desc}"})
+        self.coder.history.append({"role": "assistant", "content": full})
+        on_done(full, [])
+
+    def _call_model_blocking(self, messages: list) -> Optional[str]:
+        from .llm import _headers, _CONTROL_TOKENS_RE
+        from .agent import THINK_RE
+        import urllib.request
+
+        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": self.cfg.model,
+            "messages": messages,
+            "max_tokens": self.cfg.max_tokens,
+            "temperature": 0.2,
+            "stream": False,
+        }
+        if self.cfg.extra_body:
+            try:
+                payload.update(json.loads(self.cfg.extra_body))
+            except json.JSONDecodeError:
+                pass
+
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), headers=_headers(self.cfg), method="POST"
+        )
+        with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
+            body = json.loads(resp.read())
+        text = body["choices"][0]["message"]["content"]
+        text = _CONTROL_TOKENS_RE.sub("", text)
+        return THINK_RE.sub("", text).strip()
+
+    def _stream_model(self, messages: list, on_chunk) -> str:
+        from .llm import _headers, _CONTROL_TOKENS_RE
+        from .agent import THINK_RE
+        import urllib.request
+
+        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
+        payload = {
+            "model": self.cfg.model,
+            "messages": messages,
+            "max_tokens": self.cfg.max_tokens,
+            "temperature": 0.2,
+            "stream": True,
+        }
+        if self.cfg.extra_body:
+            try:
+                payload.update(json.loads(self.cfg.extra_body))
+            except json.JSONDecodeError:
+                pass
+
+        req = urllib.request.Request(
+            url, data=json.dumps(payload).encode(), headers=_headers(self.cfg), method="POST"
+        )
+        content_parts = []
+        with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
+            for raw_line in resp:
+                if self._cancel.is_set():
+                    break
+                line = raw_line.decode("utf-8", errors="replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
+                for choice in chunk.get("choices", []):
+                    delta = choice.get("delta") or {}
+                    if delta.get("content"):
+                        t = delta["content"]
+                        content_parts.append(t)
+                        on_chunk(json.dumps({"type": "content", "text": t}) + "\n")
+
+        full = _CONTROL_TOKENS_RE.sub("", "".join(content_parts))
+        return THINK_RE.sub("", full).strip()
+
 
 # ---- HTTP handler ------------------------------------------------------------
 
@@ -460,6 +671,10 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/clear":
             self.web_coder.coder.history.clear()
             _json_response(self, {"ok": True})
+        elif path == "/api/command":
+            self._handle_command()
+        elif path == "/api/review":
+            self._handle_review()
         else:
             self.send_error(404)
 
@@ -507,6 +722,75 @@ class Handler(BaseHTTPRequestHandler):
             done_event.set()
 
         self.web_coder.send_message(message, mode, on_chunk, on_done, on_error)
+        done_event.wait(timeout=self.web_coder.cfg.timeout + 30)
+
+    def _handle_command(self):
+        data = _read_json_body(self)
+        cmd = data.get("command", "").strip()
+        arg = data.get("arg", "").strip()
+
+        if cmd == "lint":
+            result = self.web_coder.run_lint()
+            _json_response(self, result)
+        elif cmd == "test":
+            result = self.web_coder.run_test()
+            _json_response(self, result)
+        elif cmd == "run":
+            if not arg:
+                _json_response(self, {"error": "Usage: /run <command>"}, 400)
+            else:
+                result = self.web_coder.run_command(arg)
+                _json_response(self, result)
+        elif cmd == "map":
+            result = self.web_coder.repo_map(arg)
+            _json_response(self, result)
+        elif cmd == "tokens":
+            result = self.web_coder.token_report()
+            _json_response(self, result)
+        elif cmd == "diff":
+            result = self.web_coder.show_diff()
+            _json_response(self, result)
+        else:
+            _json_response(self, {"error": f"Unknown command: /{cmd}"}, 400)
+
+    def _handle_review(self):
+        data = _read_json_body(self)
+        target = data.get("target", "").strip()
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        done_event = threading.Event()
+
+        def on_chunk(chunk_json: str):
+            try:
+                self.wfile.write(f"data: {chunk_json}\n".encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                self.web_coder.cancel()
+
+        def on_done(full_text: str, diffs: list):
+            try:
+                msg = json.dumps({"type": "done"})
+                self.wfile.write(f"data: {msg}\n\n".encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            done_event.set()
+
+        def on_error(msg: str):
+            try:
+                err = json.dumps({"type": "error", "text": msg})
+                self.wfile.write(f"data: {err}\n\n".encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            done_event.set()
+
+        self.web_coder.review(target, on_chunk, on_done, on_error)
         done_event.wait(timeout=self.web_coder.cfg.timeout + 30)
 
 
