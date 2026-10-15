@@ -11,9 +11,15 @@ send each line as a separate message. Two ways to send multi-line text:
 2. Explicit block (any OS): type \"\"\" on its own line, paste or type anything,
    then \"\"\" on its own line again to send.
 """
+from __future__ import annotations
+
 import sys
+from typing import TYPE_CHECKING, Optional
 
 from rich.console import Console
+
+if TYPE_CHECKING:
+    from prompt_toolkit.completion import Completer
 
 console = Console()
 
@@ -32,6 +38,54 @@ try:
 except (ImportError, OSError, ValueError):  # e.g. Windows consoles
     _CAN_DETECT_PASTE = False
 
+
+# ---- prompt_toolkit integration ------------------------------------------------
+
+_pt_available = False
+try:
+    from prompt_toolkit import PromptSession
+    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.history import InMemoryHistory
+    _pt_available = True
+except ImportError:
+    pass
+
+_session: Optional[PromptSession] = None
+_completer: Optional[Completer] = None
+
+
+def set_completer(completer: Completer) -> None:
+    global _completer
+    _completer = completer
+
+
+def _get_session() -> PromptSession:
+    global _session
+    if _session is None:
+        _session = PromptSession(history=InMemoryHistory())
+    return _session
+
+
+def _strip_rich_markup(prompt: str) -> str:
+    """Convert a Rich markup prompt to prompt_toolkit HTML."""
+    import re
+    tag_re = re.compile(r"\[/?[^\]]*\]")
+    return tag_re.sub("", prompt)
+
+
+def _rich_to_pt_html(prompt: str) -> HTML:
+    """Best-effort convert Rich markup to prompt_toolkit HTML for the prompt."""
+    import re
+    result = prompt
+    result = re.sub(r"\[bold (\w+)\]", r'<b><style fg="\1">', result)
+    result = re.sub(r"\[/bold \w+\]", "</style></b>", result)
+    result = re.sub(r"\[dim\]", '<style fg="gray">', result)
+    result = re.sub(r"\[/dim\]", "</style>", result)
+    result = re.sub(r"\[/?[^\]]*\]", "", result)
+    return HTML(result)
+
+
+# ---- fallback (non-prompt_toolkit) path ----------------------------------------
 
 def _drain_pasted_lines() -> list:
     """Collect lines that are already waiting (the rest of a paste)."""
@@ -87,14 +141,28 @@ def _clean(line: str) -> str:
     return line.replace(PASTE_START, "").replace(PASTE_END, "")
 
 
+# ---- public API ----------------------------------------------------------------
+
 def read_message(prompt: str) -> str:
     """Read one message. Raises EOFError / KeyboardInterrupt like input()."""
+    if _pt_available and _completer is not None and sys.stdin.isatty():
+        return _read_with_prompt_toolkit(prompt)
+
     if not _CAN_DETECT_PASTE:
         first = console.input(prompt)
         return _read_block() if first.strip() == BLOCK_MARK else first
 
     with _BracketedPaste():
         return _read_with_paste_detection(prompt)
+
+
+def _read_with_prompt_toolkit(prompt: str) -> str:
+    session = _get_session()
+    pt_prompt = _rich_to_pt_html(prompt)
+    text = session.prompt(pt_prompt, completer=_completer, complete_while_typing=False)
+    if text.strip() == BLOCK_MARK:
+        return _read_block()
+    return text
 
 
 def _read_with_paste_detection(prompt: str) -> str:

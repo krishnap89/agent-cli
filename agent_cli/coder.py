@@ -34,7 +34,7 @@ from .review import (
     build_review_messages, build_merge_messages, needs_split, REVIEW_SYSTEM,
 )
 from .editblock import EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
-from .input_reader import read_message
+from .input_reader import read_message, set_completer
 from .llm import LLMError, chat, list_models
 from .repomap import RepoMap
 from .testgen import (
@@ -1403,6 +1403,11 @@ def main(
             total, _ = coder.repo_map.build()
         console.print(f"[dim]Repo map: {total} files. Type /help for commands.[/dim]")
     coder.list_files()
+    try:
+        from .completer import CoderCompleter
+        set_completer(CoderCompleter(coder))
+    except ImportError:
+        pass
     console.print()
 
     while True:
