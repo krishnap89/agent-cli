@@ -78,10 +78,16 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "search",
-        "description": "Search file contents for a regex pattern (uses grep -rn).",
+        "description": "Find where a class, function or text appears in the code. Plain text by "
+                       "default (e.g. 'LoginViewModel' or 'fun login('); set regex=true for a regex. "
+                       "Optional path limits it to a folder. Skips build output.",
         "input_schema": {
             "type": "object",
-            "properties": {"pattern": {"type": "string"}, "path": {"type": "string", "default": "."}},
+            "properties": {
+                "pattern": {"type": "string"},
+                "path": {"type": "string", "default": "."},
+                "regex": {"type": "boolean"},
+            },
             "required": ["pattern"],
         },
     },
@@ -107,6 +113,10 @@ TOOL_SCHEMAS = [
 ]
 
 MAX_OUTPUT = 8_000  # chars returned to the model per tool call
+SEARCH_MAX_LINES = 40  # matching lines returned by search
+SEARCH_PER_FILE = 5    # matching lines per file
+SEARCH_SKIP_DIRS = {".git", "build", ".gradle", ".idea", ".cxx", ".kotlin", "node_modules",
+                    "__pycache__", ".venv", "venv", ".agent-cache", "captures", "out", "dist"}
 
 
 # ---- Implementations --------------------------------------------------------
@@ -205,13 +215,57 @@ class Tools:
         rel = self._resolve(path).relative_to(self.root).as_posix()
         return self.ensure_map().deps(rel)
 
-    def t_search(self, pattern: str, path: str = ".") -> str:
-        p = self._resolve(path)
-        r = subprocess.run(
-            ["grep", "-rnE", "--exclude-dir=.git", "--exclude-dir=node_modules", pattern, str(p)],
-            capture_output=True, text=True,
-        )
-        return r.stdout.replace(str(self.root) + "/", "") or "No matches."
+    def t_search(self, pattern: str, path: str = ".", regex=False) -> str:
+        if isinstance(regex, str):  # small models sometimes send "true"
+            regex = regex.strip().lower() in ("true", "1", "yes")
+        target = self._resolve(path)
+        rel = target.relative_to(self.root).as_posix() or "."
+        mode = "-E" if regex else "-F"  # plain text by default: "foo(" must not be a regex error
+        in_git = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=self.root,
+                                capture_output=True, text=True).returncode == 0
+        if in_git:  # respects .gitignore (build/ etc.), includes untracked files
+            cmd = ["git", "grep", "-n", "-I", "--untracked", mode, "-e", pattern, "--", rel]
+        else:
+            cmd = ["grep", "-rnI", mode] + [f"--exclude-dir={d}" for d in SEARCH_SKIP_DIRS] \
+                  + ["-e", pattern, rel]
+        try:
+            r = subprocess.run(cmd, cwd=self.root, capture_output=True, text=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            return "Search timed out. Narrow it with path (e.g. a module folder)."
+        if r.returncode > 1:  # 1 = no matches; 2 (grep) / 128 (git grep) = error
+            hint = " Set regex=false to search for plain text." if regex else ""
+            return f"Search error: {r.stderr.strip()[:300]}.{hint}"
+
+        hits = []
+        for line in r.stdout.splitlines():
+            if line.startswith("./"):
+                line = line[2:]
+            file = line.split(":", 1)[0]
+            if not any(part in SEARCH_SKIP_DIRS for part in file.split("/")):
+                hits.append(line)
+        if not hits:
+            where = "the project" if rel == "." else rel
+            return (f"No matches for {pattern!r} in {where}. Try a shorter name, another spelling, "
+                    "or repo_map(query).")
+
+        by_file = {}
+        for line in hits:
+            by_file.setdefault(line.split(":", 1)[0], []).append(line)
+        out, shown = [], 0
+        for file, lines in by_file.items():
+            if shown >= SEARCH_MAX_LINES:
+                break
+            out.append(file)
+            for line in lines[:SEARCH_PER_FILE]:
+                _, num, text = (line.split(":", 2) + ["", ""])[:3]
+                out.append(f"  {num}: {text.strip()[:160]}")
+                shown += 1
+            if len(lines) > SEARCH_PER_FILE:
+                out.append(f"  ... {len(lines) - SEARCH_PER_FILE} more in this file")
+        header = f"{len(hits)} matches in {len(by_file)} files"
+        if shown < len(hits):
+            header += f" (showing {shown}; narrow with path or a more specific pattern)"
+        return header + "\n" + "\n".join(out)
 
     def t_run_command(self, command: str) -> str:
         if not self._confirm(f"run `{command}`"):

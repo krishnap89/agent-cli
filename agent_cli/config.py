@@ -45,6 +45,14 @@ class Config:
     notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))
     skill_chars: int = int(os.getenv("AGENT_SKILL_CHARS", "3000"))
     debug: bool = os.getenv("AGENT_DEBUG", "") not in ("", "0", "false")
+    # vLLM: keep special tokens such as <tool_call> in the output. Qwen's tool-call
+    # markup is made of special tokens, which vLLM strips by default, so the
+    # model's tool call silently vanishes. Set to 0 for servers that reject it.
+    keep_special_tokens: bool = os.getenv("AGENT_KEEP_SPECIAL_TOKENS", "1") not in ("0", "false")
+    # Qwen3 thinking: "" = server default, "0" = off (faster), "1" = on.
+    thinking: str = os.getenv("AGENT_THINKING", "")
+    # Extra JSON merged into every request body, e.g. '{"top_p": 0.8}'.
+    extra_body: str = os.getenv("AGENT_EXTRA_BODY", "")
     workdir: Path = field(default_factory=Path.cwd)
     auto_approve: bool = False
 
@@ -64,7 +72,7 @@ You can call these tools:
 Write a tool call on its own, in exactly this format, with valid JSON:
 
 <tool_call>
-{{"name": "read_file", "arguments": {{"path": "main.py"}}}}
+{{"name": "search", "arguments": {{"pattern": "LoginViewModel"}}}}
 </tool_call>
 
 Rules:
@@ -74,7 +82,10 @@ Rules:
 - When the task is done, reply normally with NO tool call. That ends your turn.
 
 {repo_map_section}# Guidelines
-- Find code with the repo map, repo_map(query) and search. Don't list every folder.
+- To find where a class, function or text is defined or used, call search with a plain
+  name first, e.g. search(pattern="LoginViewModel"). Don't list every folder.
+- To see what a file depends on and what depends on it, call dependency_graph(path).
+- Use repo_map(query) when you only know the topic, not a name.
 - For big files, use outline first, then read_file with start_line/end_line.
 - Read only what the task needs: your context is small.
 - Prefer small edits with edit_file over rewriting whole files.
