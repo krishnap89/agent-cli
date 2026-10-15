@@ -263,6 +263,28 @@ Style detection: samples up to 20 existing KDoc blocks to detect tag usage
     AGENT_DOC_PER_STEP=8          # declarations per LLM batch
     AGENT_DOC_MAX_FIX=2           # fix rounds for failed edit blocks
 
+## Web UI (`agent-ui`)
+A local web interface for coder. Same features, in a browser — no external
+dependencies, no CDN, works offline.
+
+    agent-ui                        # start on a random port, opens browser
+    agent-ui --port 8080            # fixed port
+    agent-ui --no-open              # don't open browser
+    agent-ui --workdir /path/to/project
+
+Features:
+- **Chat**: ask and code modes, streamed replies, stop button, markdown rendering
+- **File management**: searchable project tree, add files as editable or read-only,
+  remove from chat
+- **Diffs**: each edit shown as a diff with an undo button
+- **Settings**: server URL, model, temperature, max tokens, context budget,
+  API key (never saved to disk), test connection button
+- **Token meter**: shows context usage as a percentage bar
+- Light and dark mode (follows system), works on narrow screens
+
+Security: binds to 127.0.0.1 only, uses a random session token in the URL
+to prevent other websites from calling the API.
+
 ## Repo map
 Both commands index the codebase into a ranked outline (files, classes,
 functions, line numbers). See it with `agent --map "query"` or /map in either
