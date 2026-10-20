@@ -1,3 +1,4 @@
+import difflib
 import subprocess
 from pathlib import Path
 
@@ -186,6 +187,8 @@ class Tools:
         self._map_built = False
         self.todos: list[dict] = []  # session task list: {text, status}
 
+    _DIFF_MAX_LINES = 60  # lines of a diff shown before a write is confirmed
+
     def ensure_map(self) -> RepoMap:
         """Build (or refresh from cache) the repo map; cheap after the first time."""
         self.repo_map.build()
@@ -202,6 +205,43 @@ class Tools:
         if self.cfg.auto_approve:
             return True
         return Confirm.ask(f"[yellow]Allow:[/yellow] {action}", default=True)
+
+    def _show_diff(self, rel: str, old_text: str, new_text: str) -> None:
+        """Print a colored, line-capped unified diff before a write is confirmed,
+        so the user sees what will change instead of approving blind."""
+        if self.cfg.auto_approve:
+            return  # no human to show it to
+        if old_text == new_text:
+            console.print(f"[dim]{rel}: no change[/dim]")
+            return
+        label = "new file" if old_text == "" else rel
+        diff = difflib.unified_diff(
+            old_text.splitlines(), new_text.splitlines(),
+            fromfile=label, tofile=label, lineterm="", n=2,
+        )
+        adds = dels = shown = 0
+        body = []
+        for line in diff:
+            if line.startswith(("---", "+++")):
+                continue
+            if line.startswith("+"):
+                adds += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                dels += 1
+            if shown < self._DIFF_MAX_LINES:
+                if line.startswith("@@"):
+                    body.append(f"[cyan]{line}[/cyan]")
+                elif line.startswith("+"):
+                    body.append(f"[green]{line}[/green]")
+                elif line.startswith("-"):
+                    body.append(f"[red]{line}[/red]")
+                else:
+                    body.append(f"[dim]{line}[/dim]")
+                shown += 1
+        console.print(f"[yellow]~ {rel}[/yellow] [dim](+{adds} -{dels})[/dim]")
+        console.print("\n".join(body))
+        if shown >= self._DIFF_MAX_LINES:
+            console.print(f"[dim]... diff truncated ({self._DIFF_MAX_LINES} lines shown)[/dim]")
 
     def run(self, name: str, args: dict) -> str:
         fn = getattr(self, f"t_{name}", None)
@@ -248,6 +288,8 @@ class Tools:
 
     def t_write_file(self, path: str, content: str) -> str:
         p = self._resolve(path)
+        old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+        self._show_diff(path, old, content)
         if not self._confirm(f"write {path} ({len(content)} chars)"):
             return "User denied the write."
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -260,6 +302,7 @@ class Tools:
         count = text.count(old_str)
         if count != 1:
             raise ToolError(f"old_str found {count} times in {path}; it must be unique.")
+        self._show_diff(path, text, text.replace(old_str, new_str))
         if not self._confirm(f"edit {path}"):
             return "User denied the edit."
         p.write_text(text.replace(old_str, new_str), encoding="utf-8")
@@ -307,6 +350,9 @@ class Tools:
 
         files = {rel for rel, _ in plan}
         summary = ", ".join(sorted(files))
+        for p, text in pending.items():
+            self._show_diff(p.relative_to(self.root).as_posix(),
+                            originals[p] or "", text)
         if not self._confirm(f"apply {len(edits)} edit(s) to {len(files)} file(s): {summary}"):
             return "User denied the patch."
         # Phase 2: all edits validated — write.

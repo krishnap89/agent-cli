@@ -282,4 +282,27 @@ class Agent:
         except (ToolError, OSError, TypeError) as e:
             output = f"Error: {e}"
             console.print(f"[red]{output}[/red]")
+        else:
+            console.print(f"  [dim]{self._summarize(name, output)}[/dim]")
         return f"<tool_response>\n[{name}]\n{output}\n</tool_response>"
+
+    @staticmethod
+    def _summarize(name: str, output: str) -> str:
+        """One-line gist of a tool result, so the user can follow the agent's
+        work instead of watching silent tool calls scroll past."""
+        text = output.strip()
+        if not text:
+            return "(no output)"
+        first = text.splitlines()[0].strip()
+        lines = text.count("\n") + 1
+        if name in ("search", "repo_map", "dependency_graph", "outline"):
+            # these already lead with a count/header line
+            return first[:160]
+        if name == "read_file":
+            return f"{lines} lines"
+        if name == "list_dir":
+            return f"{lines} entr{'y' if lines == 1 else 'ies'}"
+        if name in ("write_file", "edit_file", "apply_patch", "todo", "run_command"):
+            return first[:160]
+        # default: first line, plus a hint if there's more
+        return first[:160] + (f" (+{lines - 1} more lines)" if lines > 1 else "")

@@ -79,6 +79,72 @@ class ApplyPatchTest(unittest.TestCase):
         self.assertEqual((d / "a.py").read_text(), "x = 1\n")
 
 
+class DiffPreviewTest(unittest.TestCase):
+    """_show_diff runs before a write confirm and must not alter behaviour."""
+
+    def _capture(self, t: Tools):
+        calls = []
+        t._show_diff = lambda rel, old, new: calls.append((rel, old, new))
+        return calls
+
+    def test_edit_shows_diff_of_the_change(self):
+        t, d = make_tools()
+        t.cfg.auto_approve = False
+        t._confirm = lambda action: True
+        calls = self._capture(t)
+        (d / "a.py").write_text("x = 1\n")
+        t.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"})
+        self.assertEqual(calls, [("a.py", "x = 1\n", "x = 2\n")])
+
+    def test_write_shows_old_vs_new(self):
+        t, d = make_tools()
+        t.cfg.auto_approve = False
+        t._confirm = lambda action: True
+        calls = self._capture(t)
+        (d / "a.py").write_text("old\n")
+        t.run("write_file", {"path": "a.py", "content": "new\n"})
+        self.assertEqual(calls, [("a.py", "old\n", "new\n")])
+
+    def test_apply_patch_shows_one_diff_per_file(self):
+        t, d = make_tools()
+        t.cfg.auto_approve = False
+        t._confirm = lambda action: True
+        calls = self._capture(t)
+        (d / "a.py").write_text("x = 1\n")
+        t.run("apply_patch", {"edits": [
+            {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"},
+            {"path": "b.py", "old_str": "", "new_str": "new\n"},
+        ]})
+        rels = sorted(c[0] for c in calls)
+        self.assertEqual(rels, ["a.py", "b.py"])
+        # the new file is shown as old="" -> content
+        b = next(c for c in calls if c[0] == "b.py")
+        self.assertEqual(b[1], "")
+
+
+class SummarizeTest(unittest.TestCase):
+    def _s(self, name, output):
+        from agent_cli.agent import Agent
+        return Agent._summarize(name, output)
+
+    def test_search_uses_header_line(self):
+        self.assertEqual(self._s("search", "12 matches in 4 files\nfoo.py\n  3: x"),
+                         "12 matches in 4 files")
+
+    def test_read_file_counts_lines(self):
+        self.assertEqual(self._s("read_file", "a\nb\nc"), "3 lines")
+
+    def test_list_dir_singular_plural(self):
+        self.assertEqual(self._s("list_dir", "only"), "1 entry")
+        self.assertEqual(self._s("list_dir", "a\nb"), "2 entries")
+
+    def test_empty_output(self):
+        self.assertEqual(self._s("read_file", "   "), "(no output)")
+
+    def test_write_uses_first_line(self):
+        self.assertEqual(self._s("write_file", "Wrote a.py"), "Wrote a.py")
+
+
 class TodoTest(unittest.TestCase):
     def test_set_and_list(self):
         t, _ = make_tools()
