@@ -7,6 +7,7 @@ from rich.console import Console
 from .agent import Agent
 from .config import Config
 from .input_reader import read_message, set_completer
+from .mentions import expand as expand_mentions
 from .llm import list_models, switch_model
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
 from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
@@ -66,6 +67,14 @@ def main(
     skills = load_skills(cfg.workdir)
     pinned_skill = None  # type: ignore
 
+    def _prepare(text: str) -> str:
+        """Inline any @file mentions, then append skill context."""
+        text, notes = expand_mentions(text, cfg.workdir)
+        for note in notes:
+            color = "dim" if note.startswith("attached") else "yellow"
+            console.print(f"[{color}]{note}[/{color}]")
+        return _augment_with_skills(text)
+
     def _augment_with_skills(text: str) -> str:
         """Append skill context to the user message for the agent."""
         nonlocal pinned_skill
@@ -84,7 +93,7 @@ def main(
         return "".join(parts)
 
     if prompt:
-        agent.ask(_augment_with_skills(prompt))
+        agent.ask(_prepare(prompt))
         return
 
     console.print(f"[bold]agent[/bold] · {cfg.model} @ {cfg.base_url} · {cfg.workdir}")
@@ -102,7 +111,10 @@ def main(
                   '(inline or a """ block).\n'
                   '""" starts/ends a multi-line message; pastes are kept together.[/dim]\n')
     from .completer import AgentCompleter
-    set_completer(AgentCompleter())  # type '/' to see the command menu
+    # '/' shows the command menu; '@' completes a repo file path. The file list
+    # comes from `git ls-files` (list_files needs no repo-map build) and is
+    # fetched lazily on first '@' and cached by the completer.
+    set_completer(AgentCompleter(files_fn=lambda: agent.tools.repo_map.list_files()))
     while True:
         try:
             color = "blue" if agent.chat_only else "green"
@@ -182,7 +194,7 @@ def main(
                           "\nTo send a message starting with '/', rephrase it.[/dim]")
             continue
         try:
-            agent.ask(_augment_with_skills(text))
+            agent.ask(_prepare(text))
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
         console.print()
