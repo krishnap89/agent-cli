@@ -14,7 +14,45 @@ console = Console()
 
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
 # Also strips an unclosed <think> (model ran out of tokens while thinking)
-THINK_RE = re.compile(r"<think>.*?(?:</think>|$)", re.DOTALL)
+THINK_RE = re.compile(r"<think>(.*?)(?:</think>|$)", re.DOTALL)
+# A line that is nothing but a lead-in to the action ("So let me read that
+# file.", "I'll now call the tool.") carries no information on its own, so when
+# we pick the gist we skip past these to the last substantive line.
+_THINK_LEADIN_RE = re.compile(
+    r"^(?:so|now|ok(?:ay)?|alright|well|let me|let's|i'?ll|i will|i'?m going to|"
+    r"i should|i need to|i want to|first|next|then)\b",
+    re.IGNORECASE,
+)
+
+
+def thinking_gist(reasoning: str, content: str) -> str:
+    """One dim line summarizing what the model was thinking, or '' if none.
+
+    Reasoning can arrive split out in `reasoning` (server field) or inline as
+    <think>...</think> in `content`. We show just enough to convey the agent's
+    train of thought without dumping the whole scratchpad into the terminal."""
+    text = reasoning.strip()
+    if not text:
+        inline = THINK_RE.search(content)
+        text = inline.group(1).strip() if inline else ""
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    # The conclusion is usually near the end, but models often close with a
+    # content-free lead-in ("So I'll read that file now."). Walk back from the
+    # end to the last line that says something, keeping the lead-in only if
+    # every line is one.
+    gist = lines[-1]
+    for ln in reversed(lines):
+        if not _THINK_LEADIN_RE.match(ln):
+            gist = ln
+            break
+    gist = " ".join(gist.split())  # collapse whitespace
+    if len(gist) > 140:
+        gist = gist[:137].rstrip() + "..."
+    return gist
 
 
 CODE_RE = re.compile(r"(```[\s\S]*?(?:```|$)|`[^`\n]*`)")
@@ -193,6 +231,10 @@ class Agent:
                 self.messages.pop() if self.messages[-1]["role"] == "user" else None
                 return
             text = THINK_RE.sub("", reply.content).strip()
+            if self.cfg.show_thinking:
+                gist = thinking_gist(reply.reasoning, reply.content)
+                if gist:
+                    console.print(f"[dim]\N{THOUGHT BALLOON} {gist}[/dim]")
             if self.chat_only:  # no tools: show everything as-is
                 calls, errors, visible = [], [], text
             else:

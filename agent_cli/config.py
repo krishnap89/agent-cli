@@ -51,6 +51,9 @@ class Config:
     keep_special_tokens: bool = os.getenv("AGENT_KEEP_SPECIAL_TOKENS", "1") not in ("0", "false")
     # Qwen3 thinking: "" = server default, "0" = off (faster), "1" = on.
     thinking: str = os.getenv("AGENT_THINKING", "")
+    # Show a one-line dim gist of the model's reasoning before each reply.
+    # Set to 0 to hide it (the full reasoning is still discarded either way).
+    show_thinking: bool = os.getenv("AGENT_SHOW_THINKING", "1") not in ("0", "false")
     # Extra JSON merged into every request body, e.g. '{"top_p": 0.8}'.
     extra_body: str = os.getenv("AGENT_EXTRA_BODY", "")
     workdir: Path = field(default_factory=Path.cwd)
