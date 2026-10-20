@@ -56,10 +56,57 @@ def render_tool_docs() -> str:
     return "\n".join(docs)
 
 
+def _match_brace(s: str, start: int) -> int:
+    """Index of the '}' matching the '{' at `start`, or -1 (string-aware)."""
+    depth, in_str, esc = 0, False, False
+    for i in range(start, len(s)):
+        c = s[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+    return -1
+
+
+def _bare_json_calls(text: str) -> list[str]:
+    """Find bare JSON tool calls a model emitted without the <tool_call> wrapper.
+
+    Models often wrap the call in prose ("I'll map the repo." before, "STOP"
+    after) and emit a bare `{"name": ...}` object on its own line. We take
+    balanced-brace objects that begin a line and carry a "name" key, so a JSON
+    example quoted mid-sentence (not at a line start) is left alone.
+    """
+    out = []  # type: list[str]
+    for m in re.finditer(r"(?m)^\s*(?:```(?:json)?\s*)?\{", text):
+        start = text.index("{", m.start())
+        end = _match_brace(text, start)
+        if end == -1:
+            continue
+        obj = text[start:end + 1]
+        if '"name"' in obj:
+            out.append(obj)
+    return out
+
+
 def parse_tool_calls(text: str) -> tuple[list[dict], list[str]]:
     """Extract tool calls from model text. Returns (calls, parse_errors)."""
     calls, errors = [], []
-    for raw in TOOL_CALL_RE.findall(text):
+    blocks = TOOL_CALL_RE.findall(text)
+    if not blocks:
+        blocks = _bare_json_calls(text)
+    for raw in blocks:
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         func = XML_FUNC_RE.search(raw)
         if func and not raw.startswith("{"):
