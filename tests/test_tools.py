@@ -145,6 +145,53 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(self._s("write_file", "Wrote a.py"), "Wrote a.py")
 
 
+class FooterTest(unittest.TestCase):
+    def _footer(self, started, n):
+        import io
+        from contextlib import redirect_stdout
+        from agent_cli import agent
+        buf = io.StringIO()
+        # agent.console writes to its own stdout; capture via a temp Console
+        from rich.console import Console
+        old = agent.console
+        agent.console = Console(file=buf, force_terminal=False, width=80)
+        try:
+            agent.Agent._print_footer(started, n)
+        finally:
+            agent.console = old
+        return buf.getvalue().strip()
+
+    def test_seconds_and_plural(self):
+        import time
+        self.assertIn("3 tool calls", self._footer(time.monotonic() - 4.2, 3))
+
+    def test_singular_tool(self):
+        import time
+        self.assertIn("1 tool call", self._footer(time.monotonic() - 1, 1))
+        self.assertNotIn("calls", self._footer(time.monotonic() - 1, 1))
+
+    def test_no_tools_no_count(self):
+        import time
+        out = self._footer(time.monotonic() - 1, 0)
+        self.assertIn("done in", out)
+        self.assertNotIn("tool", out)
+
+    def test_minutes_rollover(self):
+        import time
+        self.assertIn("m", self._footer(time.monotonic() - 120, 0))
+
+
+class ToolColorTest(unittest.TestCase):
+    def test_writes_and_commands_differ_from_reads(self):
+        from agent_cli.agent import Agent
+        c = Agent._TOOL_COLORS
+        self.assertEqual(c.get("write_file"), "yellow")
+        self.assertEqual(c.get("run_command"), "magenta")
+        # reads fall through to the default (not in the map)
+        self.assertNotIn("search", c)
+        self.assertNotIn("read_file", c)
+
+
 class TodoTest(unittest.TestCase):
     def test_set_and_list(self):
         t, _ = make_tools()

@@ -1,5 +1,6 @@
 import json
 import re
+import time
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -171,6 +172,8 @@ class Agent:
         self.messages.append({"role": "user", "content": prompt})
 
         nudged = False
+        started = time.monotonic()
+        tool_count = 0
         for _ in range(self.cfg.max_turns):
             try:
                 with console.status("[dim]waiting for model...[/dim]") as status:
@@ -248,13 +251,27 @@ class Agent:
             if not calls and not errors:
                 if reply.finish_reason == "length":
                     console.print("[yellow](reply was cut off: raise AGENT_MAX_TOKENS)[/yellow]")
+                self._print_footer(started, tool_count)
                 return  # plain answer = done
 
             results = [self._run_tool(c) for c in calls]
             results += [f"<tool_response>\nError: {e}\n</tool_response>" for e in errors]
+            tool_count += len(calls)
             self.messages.append({"role": "user", "content": "\n".join(results)})
 
         console.print("[red]Stopped: hit max_turns.[/red]")
+        self._print_footer(started, tool_count)
+
+    @staticmethod
+    def _print_footer(started: float, tool_count: int) -> None:
+        """Close a turn with how long it took and how much work it did."""
+        elapsed = time.monotonic() - started
+        took = f"{elapsed:.1f}s" if elapsed < 60 else f"{elapsed / 60:.1f}m"
+        if tool_count:
+            console.print(f"[dim]done in {took}, {tool_count} tool call"
+                          f"{'' if tool_count == 1 else 's'}[/dim]")
+        else:
+            console.print(f"[dim]done in {took}[/dim]")
 
     @staticmethod
     def _from_native(tool_calls: list) -> tuple[list[dict], list[str]]:
@@ -274,9 +291,18 @@ class Agent:
             calls.append({"name": tc["name"], "arguments": args})
         return calls, errors
 
+    # Color tool calls by what they do, so the eye parses the stream faster:
+    # reads/search are safe (cyan), writes mutate files (yellow), commands run
+    # arbitrary shell (magenta).
+    _TOOL_COLORS = {
+        "write_file": "yellow", "edit_file": "yellow", "apply_patch": "yellow",
+        "run_command": "magenta", "todo": "blue",
+    }
+
     def _run_tool(self, call: dict) -> str:
         name, args = call["name"], call["arguments"]
-        console.print(f"[cyan]> {name}[/cyan] [dim]{json.dumps(args)[:120]}[/dim]")
+        color = self._TOOL_COLORS.get(name, "cyan")
+        console.print(f"[{color}]> {name}[/{color}] [dim]{json.dumps(args)[:120]}[/dim]")
         try:
             output = self.tools.run(name, args)
         except (ToolError, OSError, TypeError) as e:
