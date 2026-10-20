@@ -36,7 +36,7 @@ def builtin_lint(root: Path, files: List[str]) -> List[str]:
 
 def _check_python(path: Path, rel: str) -> Optional[str]:
     try:
-        source = path.read_text(errors="replace")
+        source = path.read_text(encoding="utf-8", errors="replace")
         compile(source, rel, "exec")
         return None
     except SyntaxError as e:
@@ -54,7 +54,7 @@ def _check_python(path: Path, rel: str) -> Optional[str]:
 
 def _check_json(path: Path, rel: str) -> Optional[str]:
     try:
-        json.loads(path.read_text(errors="replace"))
+        json.loads(path.read_text(encoding="utf-8", errors="replace"))
         return None
     except json.JSONDecodeError as e:
         return f"{rel} line {e.lineno} col {e.colno}: JSONDecodeError: {e.msg}"

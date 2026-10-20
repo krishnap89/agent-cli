@@ -485,7 +485,7 @@ def _collect_kdoc_samples(root: Path, module_path: str, max_samples: int) -> Lis
                 if not name.endswith(".kt") and not name.endswith(".kts"):
                     continue
                 try:
-                    text = Path(dirpath, name).read_text(errors="replace")
+                    text = Path(dirpath, name).read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
                 for m in _KDOC_RE.finditer(text):

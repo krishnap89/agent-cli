@@ -415,7 +415,7 @@ def extract(path: Path) -> Optional[dict]:
     try:
         if path.stat().st_size > MAX_FILE_BYTES:
             return None
-        source = path.read_text(errors="replace")
+        source = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     if "\0" in source[:1000]:
@@ -494,7 +494,7 @@ class RepoMap:
         """Index the repo, reusing the cache for unchanged files. Returns (total, reparsed)."""
         cache = {}
         try:
-            data = json.loads(self.cache_path.read_text())
+            data = json.loads(self.cache_path.read_text(encoding="utf-8"))
             if data.get("version") == CACHE_VERSION:
                 cache = data["files"]
         except (OSError, ValueError, KeyError):
@@ -529,8 +529,8 @@ class RepoMap:
             self.cache_path.parent.mkdir(parents=True, exist_ok=True)
             ignore = self.cache_path.parent / ".gitignore"
             if not ignore.exists():
-                ignore.write_text("*\n")
-            self.cache_path.write_text(json.dumps({"version": CACHE_VERSION, "files": files}))
+                ignore.write_text("*\n", encoding="utf-8")
+            self.cache_path.write_text(json.dumps({"version": CACHE_VERSION, "files": files}), encoding="utf-8")
         except OSError:
             pass
 

@@ -165,7 +165,7 @@ class Tools:
         return "\n".join(f"{e.name}/" if e.is_dir() else e.name for e in entries) or "(empty)"
 
     def t_read_file(self, path: str, start_line: int = None, end_line: int = None) -> str:
-        lines = self._resolve(path).read_text(errors="replace").splitlines()
+        lines = self._resolve(path).read_text(encoding="utf-8", errors="replace").splitlines()
         total = len(lines)
         max_lines = 400
         start = max(int(start_line or 1), 1)
@@ -197,18 +197,18 @@ class Tools:
         if not self._confirm(f"write {path} ({len(content)} chars)"):
             return "User denied the write."
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
+        p.write_text(content, encoding="utf-8")
         return f"Wrote {path}"
 
     def t_edit_file(self, path: str, old_str: str, new_str: str) -> str:
         p = self._resolve(path)
-        text = p.read_text()
+        text = p.read_text(encoding="utf-8")
         count = text.count(old_str)
         if count != 1:
             raise ToolError(f"old_str found {count} times in {path}; it must be unique.")
         if not self._confirm(f"edit {path}"):
             return "User denied the edit."
-        p.write_text(text.replace(old_str, new_str))
+        p.write_text(text.replace(old_str, new_str), encoding="utf-8")
         return f"Edited {path}"
 
     def t_dependency_graph(self, path: str) -> str:

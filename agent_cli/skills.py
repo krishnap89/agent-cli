@@ -94,7 +94,7 @@ def load_skill(skill_dir: Path) -> Optional[Skill]:
     if not md.is_file():
         return None
     try:
-        text = md.read_text(errors="replace")
+        text = md.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
     meta, body = _parse_front_matter(text)

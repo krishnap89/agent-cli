@@ -264,7 +264,7 @@ def _do_init_notes(cfg: Config) -> None:
         return
 
     out = cfg.workdir / "AGENT.md"
-    out.write_text(draft + "\n")
+    out.write_text(draft + "\n", encoding="utf-8")
     console.print(f"[green]Saved {out}[/green]")
     console.print("[dim]Review and edit it — the model drafted it from your code, "
                   "so check that it's accurate.[/dim]")

@@ -82,7 +82,7 @@ def _is_main_source(rel: str) -> bool:
 
 
 def _class_name_from_file(path: Path) -> str:
-    text = path.read_text(errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
     for line in text.splitlines():
         m = re.match(r"^\s*(?:data\s+|sealed\s+|abstract\s+|open\s+|internal\s+|private\s+)*"
                      r"(?:class|object|interface)\s+([A-Za-z_]\w*)", line)
@@ -92,7 +92,7 @@ def _class_name_from_file(path: Path) -> str:
 
 
 def _validate_method(path: Path, method: str) -> None:
-    text = path.read_text(errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
     pattern = re.compile(r"^\s*(?:.*\s)?fun\s+" + re.escape(method) + r"\s*[\(<]", re.MULTILINE)
     if not pattern.search(text):
         funs = re.findall(r"^\s*(?:.*\s)?fun\s+([A-Za-z_]\w*)", text, re.MULTILINE)
@@ -141,7 +141,7 @@ def _close_names(target: str, repo_map_files: Dict[str, Any]) -> List[str]:
 
 def _package_from_file(path: Path) -> str:
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
     for line in text.splitlines():
@@ -230,7 +230,7 @@ def detect_test_setup(
 
 def _read_file(path: Path) -> str:
     try:
-        return path.read_text(errors="replace")
+        return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
 
@@ -367,7 +367,7 @@ CLASS_KINDS = {
 
 def classify_class(path: Path, class_name: str) -> str:
     """Classify a Kotlin class into a kind for prompt customisation."""
-    text = path.read_text(errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
 
     # DAO
     if re.search(r"@Dao\b", text):
@@ -457,7 +457,7 @@ def find_test_examples(
     results = []  # type: List[Tuple[str, str]]
     for name, _, p in test_files[:max_examples]:
         try:
-            text = p.read_text(errors="replace")
+            text = p.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
         rel = p.relative_to(root).as_posix()
@@ -489,7 +489,7 @@ def find_test_helpers(root: Path, module_path: str) -> List[Dict[str, str]]:
                 continue
             p = Path(dirpath) / name
             try:
-                text = p.read_text(errors="replace")
+                text = p.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             rel = p.relative_to(root).as_posix()
@@ -540,18 +540,18 @@ def _outline(text: str, max_lines: int = 20) -> str:
 # ---------------------------------------------------------------------------
 
 def has_suspend_funs(path: Path) -> bool:
-    text = path.read_text(errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
     return bool(re.search(r"\bsuspend\s+fun\b", text))
 
 
 def has_flow_or_viewmodelscope(path: Path) -> bool:
-    text = path.read_text(errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
     return bool(re.search(r"\b(viewModelScope|Flow<|StateFlow<|SharedFlow<|CoroutineDispatcher)\b", text))
 
 
 def has_constructor_deps(path: Path) -> bool:
     """Check if the primary constructor has parameters that look like dependencies."""
-    text = path.read_text(errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
     m = re.search(r"class\s+\w+\s*\(([^)]+)\)", text)
     if not m:
         return False
@@ -562,7 +562,7 @@ def has_constructor_deps(path: Path) -> bool:
 
 def extract_constructor_types(path: Path) -> List[str]:
     """Extract type names from the primary constructor."""
-    text = path.read_text(errors="replace")
+    text = path.read_text(encoding="utf-8", errors="replace")
     m = re.search(r"class\s+\w+\s*\(([^)]*)\)", text, re.DOTALL)
     if not m:
         return []
@@ -593,7 +593,7 @@ def collect_context(
     parts = []  # type: List[str]
 
     # Target class source
-    target_text = (root / target_path).read_text(errors="replace")
+    target_text = (root / target_path).read_text(encoding="utf-8", errors="replace")
     if method:
         target_text = _extract_method_context(target_text, class_name, method)
     if len(target_text) > int(budget * 0.4):
@@ -630,7 +630,7 @@ def collect_context(
     # Existing test file
     if existing_test_path:
         try:
-            existing = (root / existing_test_path).read_text(errors="replace")
+            existing = (root / existing_test_path).read_text(encoding="utf-8", errors="replace")
             parts.append(f"# Existing test file: {existing_test_path}\n```kotlin\n{existing}\n```")
         except OSError:
             pass
@@ -689,7 +689,7 @@ def _find_type_outline(
         for d in info.get("defs", []):
             if d[3] == type_name and d[2] in ("class", "type"):
                 try:
-                    text = (root / rel).read_text(errors="replace")
+                    text = (root / rel).read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
                 # Small data classes / enums / sealed classes: include in full

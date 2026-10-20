@@ -54,7 +54,7 @@ def _has_android_plugin(root: Path) -> bool:
         for name in filenames:
             if name in ("build.gradle", "build.gradle.kts"):
                 try:
-                    text = Path(dirpath, name).read_text(errors="replace")
+                    text = Path(dirpath, name).read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
                 if _text_has_android_plugin(text):
@@ -62,7 +62,7 @@ def _has_android_plugin(root: Path) -> bool:
     toml = root / "gradle" / "libs.versions.toml"
     if toml.is_file():
         try:
-            text = toml.read_text(errors="replace")
+            text = toml.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return False
         if _toml_has_android_plugin(text):
@@ -108,7 +108,7 @@ def _discover_modules(root: Path) -> Dict[str, Dict]:
                 else:
                     mod_name = ":" + rel.replace("/", ":")
                 try:
-                    text = Path(dirpath, name).read_text(errors="replace")
+                    text = Path(dirpath, name).read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     text = ""
                 is_android = _text_has_android_plugin(text)
@@ -323,7 +323,7 @@ def format_kotlin_errors(
 def _get_context_lines(path: Path, lineno: int, context: int = 2) -> str:
     """Get a few lines around the error with line numbers."""
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return ""
     start = max(lineno - context - 1, 0)

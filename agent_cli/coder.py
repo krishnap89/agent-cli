@@ -232,7 +232,7 @@ class Coder:
 
     def _file_block(self, rel: str) -> str:
         try:
-            text = (self.root / rel).read_text(errors="replace")
+            text = (self.root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             return f"{rel}\n(could not read: {e})\n"
         fence = "```"
@@ -407,7 +407,7 @@ class Coder:
             self.undo_stack.append(changed)
             self.last_diffs = []
             for rel, old in changed.items():
-                new = (self.root / rel).read_text(errors="replace") if (self.root / rel).exists() else ""
+                new = (self.root / rel).read_text(encoding="utf-8", errors="replace") if (self.root / rel).exists() else ""
                 d = unified_diff(rel, old or "", new)
                 if d:
                     self.last_diffs.append(d)
@@ -444,7 +444,7 @@ class Coder:
                 else:
                     errors.append(f"Edit for {rel} failed: that file does not exist.")
                     continue
-            old = path.read_text(errors="replace") if path.exists() else None
+            old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
             try:
                 new = apply_edit(old or "", b.search, b.replace)
             except EditError as e:
@@ -453,7 +453,7 @@ class Coder:
                 continue
             changed.setdefault(rel, old)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(new)
+            path.write_text(new, encoding="utf-8")
             if rel not in self.editable:
                 self.editable[rel] = None
         return errors
@@ -1072,7 +1072,7 @@ class Coder:
 
             # Count ignored (CODE_BUG)
             if (self.root / t_path).is_file():
-                test_text = (self.root / t_path).read_text(errors="replace")
+                test_text = (self.root / t_path).read_text(encoding="utf-8", errors="replace")
                 bug_matches = re.findall(
                     r'// SUSPECTED BUG:\s*(.+)', test_text
                 )
@@ -1087,7 +1087,7 @@ class Coder:
         self.undo_stack.append(changed)
         self.last_diffs = []
         for c_rel, old in changed.items():
-            new = (self.root / c_rel).read_text(errors="replace") if (self.root / c_rel).exists() else ""
+            new = (self.root / c_rel).read_text(encoding="utf-8", errors="replace") if (self.root / c_rel).exists() else ""
             d = unified_diff(c_rel, old or "", new)
             if d:
                 self.last_diffs.append(d)
@@ -1154,7 +1154,7 @@ class Coder:
         for file_idx, rel in enumerate(kt_files):
             path = self.root / rel
             try:
-                source = path.read_text(errors="replace")
+                source = path.read_text(encoding="utf-8", errors="replace")
             except OSError as e:
                 console.print(f"[yellow]Cannot read {rel}: {e}[/yellow]")
                 continue
@@ -1196,7 +1196,7 @@ class Coder:
                 batch_update = update_mode and all(d.has_kdoc for d in batch)
 
                 # Save original for guardrail
-                current_source = path.read_text(errors="replace")
+                current_source = path.read_text(encoding="utf-8", errors="replace")
                 if rel not in all_changed:
                     all_changed[rel] = source  # original before any changes
 
@@ -1239,12 +1239,12 @@ class Coder:
                     continue
 
                 # Guardrail: verify only comments changed
-                new_source = path.read_text(errors="replace")
+                new_source = path.read_text(encoding="utf-8", errors="replace")
                 diff_line = verify_code_unchanged(current_source, new_source)
                 if diff_line is not None:
                     console.print(f"[red]Code change detected at line {diff_line} in {rel}. "
                                    f"Reverting batch.[/red]")
-                    path.write_text(current_source)
+                    path.write_text(current_source, encoding="utf-8")
                     code_verified = False
                     continue
 
@@ -1253,7 +1253,7 @@ class Coder:
                 if unmatched is not None:
                     console.print(f"[red]Unmatched /** at line {unmatched} in {rel}. "
                                    f"Reverting batch.[/red]")
-                    path.write_text(current_source)
+                    path.write_text(current_source, encoding="utf-8")
                     code_verified = False
                     continue
 
@@ -1263,7 +1263,7 @@ class Coder:
                     total_documented += len(batch)
 
             if rel in all_changed:
-                new_content = path.read_text(errors="replace")
+                new_content = path.read_text(encoding="utf-8", errors="replace")
                 if new_content != all_changed[rel]:
                     files_changed += 1
 
@@ -1272,7 +1272,7 @@ class Coder:
             self.undo_stack.append(all_changed)
             self.last_diffs = []
             for rel, old in all_changed.items():
-                new = (self.root / rel).read_text(errors="replace") if (self.root / rel).exists() else ""
+                new = (self.root / rel).read_text(encoding="utf-8", errors="replace") if (self.root / rel).exists() else ""
                 d = unified_diff(rel, old or "", new)
                 if d:
                     self.last_diffs.append(d)
@@ -1301,7 +1301,7 @@ class Coder:
                 self.editable.pop(rel, None)
                 console.print(f"[dim]Removed new file {rel}[/dim]")
             else:
-                path.write_text(old)
+                path.write_text(old, encoding="utf-8")
                 console.print(f"[dim]Restored {rel}[/dim]")
         self.history.append({"role": "user", "content": "I undid your last edits; the files are back "
                              "to how they were before. Don't redo them unless I ask."})
@@ -1636,7 +1636,7 @@ def _do_init_notes(cfg: Config) -> None:
         return
 
     out = cfg.workdir / "AGENT.md"
-    out.write_text(draft + "\n")
+    out.write_text(draft + "\n", encoding="utf-8")
     console.print(f"[green]Saved {out}[/green]")
     console.print("[dim]Review and edit it — the model drafted it from your code, "
                   "so check that it's accurate.[/dim]")
