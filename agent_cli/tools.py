@@ -79,8 +79,10 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "search",
-        "description": "Find where a class, function or text appears in the code. Plain text by "
-                       "default (e.g. 'LoginViewModel' or 'fun login('); set regex=true for a regex. "
+        "description": "Find where a class, function or text appears in the code, and also files "
+                       "whose name matches the pattern (so 'agent.py' finds the file even if no code "
+                       "mentions it). Plain text by default (e.g. 'LoginViewModel' or 'fun login('); "
+                       "set regex=true for a regex (filename matching is skipped in regex mode). "
                        "Optional path limits it to a folder. Skips build output.",
         "input_schema": {
             "type": "object",
@@ -372,6 +374,28 @@ class Tools:
         rel = self._resolve(path).relative_to(self.root).as_posix()
         return self.ensure_map().deps(rel)
 
+    def _find_files(self, pattern: str, rel: str) -> list:
+        """Paths whose name/path contains `pattern` (case-insensitive).
+
+        Content search greps file *contents*, so a query that is really a
+        filename ('agent.py') finds nothing useful. Matching paths too means
+        'where is X.py' works whether X.py is referenced in code or not.
+        """
+        in_git = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=self.root,
+                                capture_output=True, text=True).returncode == 0
+        if in_git:
+            r = subprocess.run(["git", "ls-files", "--cached", "--others",
+                                "--exclude-standard", "--", rel],
+                               cwd=self.root, capture_output=True, text=True, timeout=30)
+            paths = r.stdout.splitlines()
+        else:
+            base = self._resolve(rel)
+            paths = [p.relative_to(self.root).as_posix() for p in base.rglob("*")
+                     if p.is_file() and not any(part in SEARCH_SKIP_DIRS
+                                                for part in p.relative_to(self.root).parts)]
+        needle = pattern.lower()
+        return [p for p in paths if needle in p.lower()][:SEARCH_MAX_LINES]
+
     def t_search(self, pattern: str, path: str = ".", regex=False) -> str:
         if isinstance(regex, str):  # small models sometimes send "true"
             regex = regex.strip().lower() in ("true", "1", "yes")
@@ -400,8 +424,13 @@ class Tools:
             file = line.split(":", 1)[0]
             if not any(part in SEARCH_SKIP_DIRS for part in file.split("/")):
                 hits.append(line)
+        file_matches = [] if regex else self._find_files(pattern, rel)
         if not hits:
             where = "the project" if rel == "." else rel
+            if file_matches:
+                listed = "\n".join(f"  {f}" for f in file_matches)
+                return (f"No file *contents* match {pattern!r}, but it looks like a filename. "
+                        f"{len(file_matches)} file(s) have it in their path:\n{listed}")
             return (f"No matches for {pattern!r} in {where}. Try a shorter name, another spelling, "
                     "or repo_map(query).")
 
@@ -422,7 +451,12 @@ class Tools:
         header = f"{len(hits)} matches in {len(by_file)} files"
         if shown < len(hits):
             header += f" (showing {shown}; narrow with path or a more specific pattern)"
-        return header + "\n" + "\n".join(out)
+        result = header + "\n" + "\n".join(out)
+        extra = [f for f in file_matches if f not in by_file]
+        if extra:
+            result += ("\n\nFiles whose name also matches:\n"
+                       + "\n".join(f"  {f}" for f in extra))
+        return result
 
     _TODO_STATUSES = {"pending", "in_progress", "done"}
 

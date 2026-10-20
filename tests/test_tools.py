@@ -145,6 +145,42 @@ class SummarizeTest(unittest.TestCase):
         self.assertEqual(self._s("write_file", "Wrote a.py"), "Wrote a.py")
 
 
+class SearchFindsFilesTest(unittest.TestCase):
+    """search must surface files whose *name* matches, not just contents."""
+
+    def _repo(self):
+        import subprocess
+        t, d = make_tools()
+        (d / "pkg").mkdir()
+        (d / "pkg" / "agent.py").write_text("def run(): pass\n")
+        (d / "README.md").write_text("The agent.py module does X.\n")
+        (d / "other.py").write_text("import something\n")
+        subprocess.run(["git", "init", "-q"], cwd=d)
+        subprocess.run(["git", "add", "-A"], cwd=d)
+        return t, d
+
+    def test_filename_only_match_when_no_content(self):
+        t, d = self._repo()
+        # 'pkg/agent.py' is a filename but no file *content* is literally that string
+        out = t.run("search", {"pattern": "pkg/agent.py"})
+        self.assertIn("looks like a filename", out)
+        self.assertIn("pkg/agent.py", out)
+
+    def test_filename_appended_to_content_hits(self):
+        t, d = self._repo()
+        out = t.run("search", {"pattern": "agent.py"})
+        # README mentions it (content) AND pkg/agent.py is a name match
+        self.assertIn("README.md", out)
+        self.assertIn("Files whose name also matches", out)
+        self.assertIn("pkg/agent.py", out)
+
+    def test_regex_mode_skips_filename_matching(self):
+        t, d = self._repo()
+        out = t.run("search", {"pattern": "nonexistent.py", "regex": True})
+        self.assertIn("No matches", out)
+        self.assertNotIn("filename", out)
+
+
 class FooterTest(unittest.TestCase):
     def _footer(self, started, n):
         import io
