@@ -250,6 +250,30 @@ input:focus, textarea:focus, select:focus {
   padding: 1px 6px;
   border-radius: 4px;
 }
+.folder-item {
+  display: flex;
+  align-items: center;
+  padding: 3px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  gap: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+.folder-item:hover { background: var(--bg-surface2); }
+.folder-item .caret {
+  display: inline-block;
+  width: 10px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+}
+.folder-item.open .caret { transform: rotate(90deg); }
+.folder-item .folder-name { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+.tree-children { display: none; }
+.tree-children.open { display: block; }
 
 /* ---- chat files ---- */
 .chat-files {
@@ -1066,43 +1090,110 @@ async function loadFiles() {
   }
 }
 
+let fileSearchTimer = null;
 function filterFiles() {
-  const q = document.getElementById("fileSearch").value.toLowerCase();
+  clearTimeout(fileSearchTimer);
+  fileSearchTimer = setTimeout(doFilterFiles, 120);
+}
+
+function doFilterFiles() {
+  const q = document.getElementById("fileSearch").value.trim().toLowerCase();
+  if (!q) {
+    renderFileTree(allFiles);  // back to the folder tree
+    return;
+  }
   const filtered = allFiles.filter(f => f.toLowerCase().includes(q));
-  renderFileTree(filtered);
+  renderFlatList(filtered);
+}
+
+// Build a nested {dirs, files} tree from flat "a/b/c.py" paths.
+function buildTree(files) {
+  const root = {dirs: {}, files: []};
+  for (const f of files) {
+    const parts = f.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const d = parts[i];
+      if (!node.dirs[d]) node.dirs[d] = {dirs: {}, files: []};
+      node = node.dirs[d];
+    }
+    node.files.push({name: parts[parts.length - 1], path: f});
+  }
+  return root;
+}
+
+// Render one tree level into `container`. Children are only built when a
+// folder is expanded, so a large repo lays out just its top level first.
+function renderTreeLevel(node, container, prefix) {
+  const dirNames = Object.keys(node.dirs).sort();
+  for (const d of dirNames) {
+    const child = node.dirs[d];
+    const row = document.createElement("div");
+    row.className = "folder-item";
+    row.innerHTML = '<span class="caret">&#9656;</span>' +
+      '<span class="folder-name">' + escapeHtml(d) + '/</span>';
+
+    const kids = document.createElement("div");
+    kids.className = "tree-children";
+    kids.style.paddingLeft = "12px";
+
+    let built = false;
+    row.onclick = () => {
+      const open = row.classList.toggle("open");
+      kids.classList.toggle("open", open);
+      if (open && !built) {  // lazy: build children on first expand
+        renderTreeLevel(child, kids, prefix + d + "/");
+        built = true;
+      }
+    };
+    container.appendChild(row);
+    container.appendChild(kids);
+  }
+  for (const f of node.files) {
+    container.appendChild(fileRow(f.path, f.name, ""));
+  }
+}
+
+function fileRow(fullPath, label, dirHint) {
+  const item = document.createElement("div");
+  item.className = "file-item";
+  let pathHtml = "";
+  if (dirHint) pathHtml += '<span class="dir">' + escapeHtml(dirHint) + '</span>';
+  pathHtml += escapeHtml(label);
+  item.innerHTML = '<span class="path">' + pathHtml + '</span>' +
+    '<span class="actions">' +
+    '<button onclick="addFile(\'' + escapeAttr(fullPath) + '\', false)">+edit</button>' +
+    '<button onclick="addFile(\'' + escapeAttr(fullPath) + '\', true)">+read</button>' +
+    '</span>';
+  return item;
 }
 
 function renderFileTree(files) {
   const el = document.getElementById("fileTree");
   el.innerHTML = "";
-  const limit = 200;
-  const shown = files.slice(0, limit);
-  for (const f of shown) {
-    const item = document.createElement("div");
-    item.className = "file-item";
+  renderTreeLevel(buildTree(files), el, "");
+}
 
+// Flat list used for search results (full path shown, capped).
+function renderFlatList(files) {
+  const el = document.getElementById("fileTree");
+  el.innerHTML = "";
+  const limit = 200;
+  const frag = document.createDocumentFragment();
+  for (const f of files.slice(0, limit)) {
     const parts = f.split("/");
     const name = parts.pop();
-    const dir = parts.join("/");
-
-    let pathHtml = '';
-    if (dir) pathHtml += '<span class="dir">' + escapeHtml(dir) + '/</span>';
-    pathHtml += escapeHtml(name);
-
-    item.innerHTML = '<span class="path">' + pathHtml + '</span>' +
-      '<span class="actions">' +
-      '<button onclick="addFile(\'' + escapeAttr(f) + '\', false)">+edit</button>' +
-      '<button onclick="addFile(\'' + escapeAttr(f) + '\', true)">+read</button>' +
-      '</span>';
-    el.appendChild(item);
+    const dir = parts.length ? parts.join("/") + "/" : "";
+    frag.appendChild(fileRow(f, name, dir));
   }
   if (files.length > limit) {
     const more = document.createElement("div");
     more.className = "file-item";
     more.style.color = "var(--text-dim)";
-    more.textContent = "... " + (files.length - limit) + " more (use search)";
-    el.appendChild(more);
+    more.textContent = "... " + (files.length - limit) + " more (refine search)";
+    frag.appendChild(more);
   }
+  el.appendChild(frag);
 }
 
 function escapeAttr(s) {
