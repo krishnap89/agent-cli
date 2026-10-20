@@ -11,6 +11,7 @@ from .llm import list_models, switch_model
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
 from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
+from .writing import handle as handle_writing
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -97,6 +98,8 @@ def main(
                   "/chat = chat only, /agent = use tools, /review [target] = code review, "
                   "/map [query] = repo map, /notes = show notes, /skills = list skills, "
                   "/model [name] = switch model, /clear = reset, /exit = quit.\n"
+                  "Writing: /grammar, /rephrase, /tone <style>, /email, /slack — each takes text "
+                  '(inline or a """ block).\n'
                   '""" starts/ends a multi-line message; pastes are kept together.[/dim]\n')
     while True:
         try:
@@ -153,9 +156,28 @@ def main(
         if text == "/model" or text.startswith("/model "):
             switch_model(cfg, text[6:], console)
             continue
+        if text.split(None, 1)[0] in ("/grammar", "/rephrase", "/tone", "/email", "/slack"):
+            # Split off the command word; the rest (which may begin on the next
+            # line, e.g. a """ block) is the text to transform. split(None, 1)
+            # splits on the first run of any whitespace, newlines included.
+            parts = text.split(None, 1)
+            cmd = parts[0]
+            arg = parts[1] if len(parts) > 1 else ""
+            handle_writing(cfg, cmd, arg.strip())
+            continue
         if text == "/clear":
             agent.reset()
             console.print("[dim]History cleared.[/dim]")
+            continue
+        if text.startswith("/"):
+            # Reached here with a leading slash means no command above matched,
+            # so it's a typo'd/unknown command (e.g. /grammer). Warn instead of
+            # silently sending it to the model as a chat message.
+            unknown = text.split(None, 1)[0]
+            console.print(f"[yellow]Unknown command: {unknown}[/yellow]")
+            console.print("[dim]Commands: /chat /agent /review /map /notes /skills /skill "
+                          "/model /clear /exit · writing: /grammar /rephrase /tone /email /slack"
+                          "\nTo send a message starting with '/', rephrase it.[/dim]")
             continue
         try:
             agent.ask(_augment_with_skills(text))
