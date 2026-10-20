@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 ALL_COMMANDS = [
     "/add", "/ask", "/autotest", "/check", "/clear", "/code", "/compile",
     "/diff", "/doc", "/drop", "/exit", "/help", "/lint", "/ls", "/map",
-    "/mode", "/modules", "/notes", "/quit", "/read", "/reset", "/review",
+    "/mode", "/model", "/modules", "/notes", "/quit", "/read", "/reset", "/review",
     "/run", "/skill", "/skills", "/test", "/test-gen", "/tokens", "/undo",
 ]
 

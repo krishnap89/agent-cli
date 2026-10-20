@@ -254,3 +254,40 @@ def list_models(cfg: Config) -> list:
     with urllib.request.urlopen(req, timeout=10) as resp:
         data = json.loads(resp.read().decode())
     return [m["id"] for m in data.get("data", [])]
+
+
+def switch_model(cfg: Config, name: str, console) -> None:
+    """Handle the /model command for both the agent and coder REPLs.
+
+    With no name, show the current model and the server's available ones.
+    With a name, point cfg.model at it; every later request reads cfg.model,
+    so the switch takes effect on the next message with no history reset.
+    """
+    name = name.strip()
+    if not name:
+        console.print(f"[dim]Current model: {cfg.model}[/dim]")
+        try:
+            models = list_models(cfg)
+        except Exception as e:
+            console.print(f"[yellow]Could not list models from {cfg.base_url}: {e}[/yellow]")
+            console.print("[dim]Usage: /model <name>[/dim]")
+            return
+        if models:
+            console.print("[dim]Available:[/dim]")
+            for m in models:
+                marker = " [green]*[/green]" if m == cfg.model else ""
+                console.print(f"  {m}{marker}")
+        console.print("[dim]Switch with: /model <name>[/dim]")
+        return
+
+    # Warn if the name isn't one the server advertises, but still allow it:
+    # some endpoints don't list every model they accept.
+    try:
+        models = list_models(cfg)
+    except Exception:
+        models = []
+    if models and name not in models:
+        console.print(f"[yellow]'{name}' is not in the server's model list; "
+                      "switching anyway.[/yellow]")
+    cfg.model = name
+    console.print(f"[green]Model: {cfg.model}[/green]")

@@ -7,7 +7,7 @@ from rich.console import Console
 from .agent import Agent
 from .config import Config
 from .input_reader import read_message
-from .llm import list_models
+from .llm import list_models, switch_model
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
 from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
@@ -96,7 +96,7 @@ def main(
     console.print(f"[dim]Mode: {agent.mode_name}. "
                   "/chat = chat only, /agent = use tools, /review [target] = code review, "
                   "/map [query] = repo map, /notes = show notes, /skills = list skills, "
-                  "/clear = reset, /exit = quit.\n"
+                  "/model [name] = switch model, /clear = reset, /exit = quit.\n"
                   '""" starts/ends a multi-line message; pastes are kept together.[/dim]\n')
     while True:
         try:
@@ -149,6 +149,9 @@ def main(
                                   "Or create AGENT.md in the project root.[/dim]")
             else:
                 console.print("[dim]Project notes disabled (AGENT_NOTES=0).[/dim]")
+            continue
+        if text == "/model" or text.startswith("/model "):
+            switch_model(cfg, text[6:], console)
             continue
         if text == "/clear":
             agent.reset()

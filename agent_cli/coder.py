@@ -35,7 +35,7 @@ from .review import (
 )
 from .editblock import EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
 from .input_reader import read_message, set_completer
-from .llm import LLMError, chat, list_models
+from .llm import LLMError, chat, list_models, switch_model
 from .repomap import RepoMap
 from .testgen import (
     resolve_target, detect_test_setup, classify_class, check_required_libs,
@@ -132,6 +132,7 @@ HELP = """Commands:
   /notes               show project notes file
   /map [query]         show the repo map
   /tokens              estimate context usage
+  /model [name]        show or switch the model (no name: list server models)
   /clear               clear chat history (keep files)
   /reset               drop all files and clear history
   /help, /exit
@@ -1591,6 +1592,8 @@ def main(
                 coder.drop([])
             elif cmd == "/check":
                 console.print(", ".join(list_models(cfg)))
+            elif cmd == "/model":
+                switch_model(cfg, arg, console)
             elif text.startswith("/"):
                 console.print(f"[yellow]Unknown command {cmd}. Type /help.[/yellow]")
             else:
