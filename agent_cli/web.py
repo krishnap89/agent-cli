@@ -14,7 +14,7 @@ import urllib.parse
 import webbrowser
 from functools import partial
 from http import HTTPStatus
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,7 +24,9 @@ from .config import Config
 from .coder import Coder
 from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
 from .editblock import parse_edit_blocks, unified_diff
-from .llm import LLMError, chat, Reply, list_models
+from .llm import (
+    LLMError, chat, list_models, open_stream, iter_stream_events, clean_content,
+)
 from .repomap import RepoMap
 from .review import (
     collect_material, needs_split, split_material_by_file,
@@ -76,11 +78,20 @@ class WebCoder:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.coder = Coder(cfg)
-        self.lock = threading.Lock()
+        self.lock = threading.Lock()  # guards coder mutations (files, history, undo)
+        self._busy_lock = threading.Lock()
         self._cancel = threading.Event()
         self._busy = False
         if self.coder.repo_map is not None:
             self.coder.repo_map.build()
+
+    def _claim_busy(self) -> bool:
+        """Atomically take the single-worker slot. Returns False if already busy."""
+        with self._busy_lock:
+            if self._busy:
+                return False
+            self._busy = True
+            return True
 
     # ---- file ops (fast, under lock) ----------------------------------------
 
@@ -96,54 +107,57 @@ class WebCoder:
     def add_files(self, patterns: List[str], read_only: bool = False) -> List[str]:
         import glob as glob_mod
         added = []
-        target = self.coder.read_only if read_only else self.coder.editable
-        for pat in patterns:
-            matches = sorted(glob_mod.glob(str(self.coder.root / pat), recursive=True))
-            matches = [m for m in matches if Path(m).is_file()]
-            for m in matches:
-                try:
-                    rel = self.coder._rel(m)
-                except ValueError:
-                    continue
-                self.coder.editable.pop(rel, None)
-                self.coder.read_only.pop(rel, None)
-                target[rel] = None
-                added.append(rel)
+        with self.lock:
+            target = self.coder.read_only if read_only else self.coder.editable
+            for pat in patterns:
+                matches = sorted(glob_mod.glob(str(self.coder.root / pat), recursive=True))
+                matches = [m for m in matches if Path(m).is_file()]
+                for m in matches:
+                    try:
+                        rel = self.coder._rel(m)
+                    except ValueError:
+                        continue
+                    self.coder.editable.pop(rel, None)
+                    self.coder.read_only.pop(rel, None)
+                    target[rel] = None
+                    added.append(rel)
         return added
 
     def drop_files(self, patterns: List[str]) -> List[str]:
         import fnmatch as fn_mod
-        if not patterns:
-            dropped = list(self.coder.editable) + list(self.coder.read_only)
-            self.coder.editable.clear()
-            self.coder.read_only.clear()
-            return dropped
-        dropped = []
-        for pat in patterns:
-            gone = [f for f in list(self.coder.editable) + list(self.coder.read_only)
-                    if f == pat or fn_mod.fnmatch(f, pat) or f.endswith("/" + pat)]
-            for f in gone:
-                self.coder.editable.pop(f, None)
-                self.coder.read_only.pop(f, None)
-                dropped.append(f)
+        with self.lock:
+            if not patterns:
+                dropped = list(self.coder.editable) + list(self.coder.read_only)
+                self.coder.editable.clear()
+                self.coder.read_only.clear()
+                return dropped
+            dropped = []
+            for pat in patterns:
+                gone = [f for f in list(self.coder.editable) + list(self.coder.read_only)
+                        if f == pat or fn_mod.fnmatch(f, pat) or f.endswith("/" + pat)]
+                for f in gone:
+                    self.coder.editable.pop(f, None)
+                    self.coder.read_only.pop(f, None)
+                    dropped.append(f)
         return dropped
 
     # ---- undo ---------------------------------------------------------------
 
     def undo(self) -> Optional[List[str]]:
-        if not self.coder.undo_stack:
-            return None
-        snapshot = self.coder.undo_stack.pop()
-        reverted = []
-        for rel, old_content in snapshot.items():
-            path = self.coder.root / rel
-            if old_content is None:
-                if path.exists():
-                    path.unlink()
-            else:
-                path.write_text(old_content)
-            reverted.append(rel)
-        self.coder._all_files = None
+        with self.lock:
+            if not self.coder.undo_stack:
+                return None
+            snapshot = self.coder.undo_stack.pop()
+            reverted = []
+            for rel, old_content in snapshot.items():
+                path = self.coder.root / rel
+                if old_content is None:
+                    if path.exists():
+                        path.unlink()
+                else:
+                    path.write_text(old_content, encoding="utf-8")
+                reverted.append(rel)
+            self.coder._all_files = None
         return reverted
 
     # ---- chat (streamed via SSE, run in a background thread) ----------------
@@ -156,11 +170,10 @@ class WebCoder:
         on_error(msg) is called on failure.
         All callbacks are called from a background thread.
         """
-        if self._busy:
+        if not self._claim_busy():
             on_error("Model is already working on a request.")
             return
         self._cancel.clear()
-        self._busy = True
 
         def _run():
             try:
@@ -182,71 +195,22 @@ class WebCoder:
         self.coder.history.append({"role": "user", "content": user_text})
         messages = self.coder.build_messages(user_text)
 
-        content_parts = []
-        reasoning_parts = []
-
-        def on_progress(phase, chars):
-            pass  # we use a custom streaming approach below
+        content_parts: List[str] = []
+        finish = ""
 
         try:
-            url = self.cfg.base_url.rstrip("/") + "/chat/completions"
-            from .llm import _headers, _Retryable, RETRY_STATUS, _CONTROL_TOKENS_RE
-            import time
-
-            payload = {
-                "model": self.cfg.model,
-                "messages": messages,
-                "max_tokens": self.cfg.max_tokens,
-                "temperature": self.cfg.temperature,
-                "stream": True,
-            }
-            if self.cfg.keep_special_tokens:
-                payload["skip_special_tokens"] = False
-            if self.cfg.thinking in ("0", "1"):
-                payload["chat_template_kwargs"] = {"enable_thinking": self.cfg.thinking == "1"}
-            if self.cfg.extra_body:
-                try:
-                    payload.update(json.loads(self.cfg.extra_body))
-                except json.JSONDecodeError:
-                    pass
-
-            import urllib.request
-            req = urllib.request.Request(
-                url, data=json.dumps(payload).encode(), headers=_headers(self.cfg), method="POST"
-            )
-
-            finish = ""
-            with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
-                for raw_line in resp:
+            with open_stream(self.cfg, messages) as resp:
+                for kind, value in iter_stream_events(self.cfg, resp):
                     if self._cancel.is_set():
                         on_chunk(json.dumps({"type": "cancelled"}) + "\n")
                         break
-
-                    line = raw_line.decode("utf-8", errors="replace").strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line[5:].strip()
-                    if data == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    if "error" in chunk:
-                        raise LLMError(f"Server error: {json.dumps(chunk['error'])[:300]}")
-                    for choice in chunk.get("choices", []):
-                        delta = choice.get("delta") or {}
-                        if delta.get("content"):
-                            text_chunk = delta["content"]
-                            content_parts.append(text_chunk)
-                            on_chunk(json.dumps({"type": "content", "text": text_chunk}) + "\n")
-                        think = delta.get("reasoning_content") or delta.get("reasoning")
-                        if think:
-                            reasoning_parts.append(think)
-                            on_chunk(json.dumps({"type": "thinking", "text": think}) + "\n")
-                        if choice.get("finish_reason"):
-                            finish = choice["finish_reason"]
-
+                    if kind == "content":
+                        content_parts.append(value)
+                        on_chunk(json.dumps({"type": "content", "text": value}) + "\n")
+                    elif kind == "thinking":
+                        on_chunk(json.dumps({"type": "thinking", "text": value}) + "\n")
+                    elif kind == "finish":
+                        finish = value
         except LLMError:
             raise
         except Exception as e:
@@ -254,59 +218,58 @@ class WebCoder:
         finally:
             self.coder.mode = old_mode
 
-        full_text = _CONTROL_TOKENS_RE.sub("", "".join(content_parts))
-        if "</think>" in full_text and "<think>" not in full_text:
-            full_text = full_text.split("</think>", 1)[1]
         from .agent import THINK_RE
-        full_text = THINK_RE.sub("", full_text).strip()
+        full_text = THINK_RE.sub("", clean_content("".join(content_parts))).strip()
 
         self.coder.history.append({"role": "assistant", "content": full_text})
 
-        # Apply edit blocks if in code mode
+        # Apply edit blocks if in code mode. Guarded by self.lock so a concurrent
+        # /api/add, /api/drop or /api/undo can't mutate editable/undo_stack mid-apply.
         diffs = []
         if mode == "code":
             blocks, problems = parse_edit_blocks(full_text, default_path=self.coder._single_file())
             if blocks:
+                from .editblock import apply_edit, EditError
                 changed: Dict[str, Optional[str]] = {}
                 errors = []
-                for b in blocks:
-                    try:
-                        rel = self.coder._rel(b.path.strip())
-                    except ValueError as e:
-                        errors.append(str(e))
-                        continue
-                    path = self.coder.root / rel
-                    if rel not in self.coder.editable:
-                        if path.exists():
-                            self.coder.editable[rel] = None
-                        elif not b.search.strip():
-                            pass  # new file creation
-                        else:
-                            errors.append(f"Edit for {rel} failed: file not in chat.")
+                with self.lock:
+                    for b in blocks:
+                        try:
+                            rel = self.coder._rel(b.path.strip())
+                        except ValueError as e:
+                            errors.append(str(e))
                             continue
-                    from .editblock import apply_edit, EditError
-                    old = path.read_text(errors="replace") if path.exists() else None
-                    try:
-                        new = apply_edit(old or "", b.search, b.replace)
-                    except EditError as e:
-                        errors.append(str(e))
-                        continue
-                    changed.setdefault(rel, old)
-                    path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_text(new)
-                    if rel not in self.coder.editable:
-                        self.coder.editable[rel] = None
+                        path = self.coder.root / rel
+                        if rel not in self.coder.editable:
+                            if path.exists():
+                                self.coder.editable[rel] = None
+                            elif not b.search.strip():
+                                pass  # new file creation
+                            else:
+                                errors.append(f"Edit for {rel} failed: file not in chat.")
+                                continue
+                        old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
+                        try:
+                            new = apply_edit(old or "", b.search, b.replace)
+                        except EditError as e:
+                            errors.append(str(e))
+                            continue
+                        changed.setdefault(rel, old)
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(new, encoding="utf-8")
+                        if rel not in self.coder.editable:
+                            self.coder.editable[rel] = None
 
-                for rel, old_content in changed.items():
-                    new_content = (self.coder.root / rel).read_text(errors="replace") \
-                        if (self.coder.root / rel).exists() else ""
-                    d = unified_diff(rel, old_content or "", new_content)
-                    if d:
-                        diffs.append({"file": rel, "diff": d})
+                    for rel, old_content in changed.items():
+                        new_content = (self.coder.root / rel).read_text(encoding="utf-8", errors="replace") \
+                            if (self.coder.root / rel).exists() else ""
+                        d = unified_diff(rel, old_content or "", new_content)
+                        if d:
+                            diffs.append({"file": rel, "diff": d})
 
-                if changed:
-                    self.coder.undo_stack.append(changed)
-                    self.coder._all_files = None
+                    if changed:
+                        self.coder.undo_stack.append(changed)
+                        self.coder._all_files = None
 
                 if errors:
                     on_chunk(json.dumps({"type": "errors", "errors": errors}) + "\n")
@@ -435,11 +398,10 @@ class WebCoder:
         return {"ok": True, "diffs": diffs}
 
     def review(self, target: str, on_chunk, on_done, on_error):
-        if self._busy:
+        if not self._claim_busy():
             on_error("Model is already working on a request.")
             return
         self._cancel.clear()
-        self._busy = True
 
         def _run():
             try:
@@ -496,79 +458,22 @@ class WebCoder:
         on_done(full, [])
 
     def _call_model_blocking(self, messages: list) -> Optional[str]:
-        from .llm import _headers, _CONTROL_TOKENS_RE
+        """Non-streaming call used for per-file review chunks (reviews run at temp 0.2)."""
+        reply = chat(self.cfg, messages, temperature=0.2)  # retries; reviews are deterministic
         from .agent import THINK_RE
-        import urllib.request
-
-        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
-        payload = {
-            "model": self.cfg.model,
-            "messages": messages,
-            "max_tokens": self.cfg.max_tokens,
-            "temperature": 0.2,
-            "stream": False,
-        }
-        if self.cfg.extra_body:
-            try:
-                payload.update(json.loads(self.cfg.extra_body))
-            except json.JSONDecodeError:
-                pass
-
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode(), headers=_headers(self.cfg), method="POST"
-        )
-        with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
-            body = json.loads(resp.read())
-        text = body["choices"][0]["message"]["content"]
-        text = _CONTROL_TOKENS_RE.sub("", text)
-        return THINK_RE.sub("", text).strip()
+        return THINK_RE.sub("", reply.content).strip()
 
     def _stream_model(self, messages: list, on_chunk) -> str:
-        from .llm import _headers, _CONTROL_TOKENS_RE
         from .agent import THINK_RE
-        import urllib.request
-
-        url = self.cfg.base_url.rstrip("/") + "/chat/completions"
-        payload = {
-            "model": self.cfg.model,
-            "messages": messages,
-            "max_tokens": self.cfg.max_tokens,
-            "temperature": 0.2,
-            "stream": True,
-        }
-        if self.cfg.extra_body:
-            try:
-                payload.update(json.loads(self.cfg.extra_body))
-            except json.JSONDecodeError:
-                pass
-
-        req = urllib.request.Request(
-            url, data=json.dumps(payload).encode(), headers=_headers(self.cfg), method="POST"
-        )
-        content_parts = []
-        with urllib.request.urlopen(req, timeout=self.cfg.timeout) as resp:
-            for raw_line in resp:
+        content_parts: List[str] = []
+        with open_stream(self.cfg, messages, temperature=0.2) as resp:
+            for kind, value in iter_stream_events(self.cfg, resp):
                 if self._cancel.is_set():
                     break
-                line = raw_line.decode("utf-8", errors="replace").strip()
-                if not line.startswith("data:"):
-                    continue
-                data = line[5:].strip()
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                for choice in chunk.get("choices", []):
-                    delta = choice.get("delta") or {}
-                    if delta.get("content"):
-                        t = delta["content"]
-                        content_parts.append(t)
-                        on_chunk(json.dumps({"type": "content", "text": t}) + "\n")
-
-        full = _CONTROL_TOKENS_RE.sub("", "".join(content_parts))
-        return THINK_RE.sub("", full).strip()
+                if kind == "content":
+                    content_parts.append(value)
+                    on_chunk(json.dumps({"type": "content", "text": value}) + "\n")
+        return THINK_RE.sub("", clean_content("".join(content_parts))).strip()
 
 
 # ---- HTTP handler ------------------------------------------------------------
@@ -622,7 +527,7 @@ class Handler(BaseHTTPRequestHandler):
         if not html_path.exists():
             self.send_error(500, "index.html not found")
             return
-        html = html_path.read_text()
+        html = html_path.read_text(encoding="utf-8")
         html = html.replace("__SESSION_TOKEN__", self.session_token)
         body = html.encode()
         self.send_response(200)
@@ -813,7 +718,9 @@ def main(
         "session_token": token,
     })
 
-    server = HTTPServer(("127.0.0.1", port), handler_class)
+    # Threaded so /api/cancel (and other requests) are served while a chat or
+    # review is streaming; the single-threaded HTTPServer blocked them.
+    server = ThreadingHTTPServer(("127.0.0.1", port), handler_class)
     actual_port = server.server_address[1]
     url = f"http://127.0.0.1:{actual_port}/?token={token}"
 

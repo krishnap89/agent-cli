@@ -37,10 +37,7 @@ _CONTROL_TOKENS_RE = re.compile(r"<\|(?:im_end|im_start|endoftext|end_of_text|eo
 class Reply:
     def __init__(self, content: str, finish_reason: str, reasoning: str,
                  tool_calls: Optional[list] = None):
-        content = _CONTROL_TOKENS_RE.sub("", content or "")
-        if "</think>" in content and "<think>" not in content:
-            content = content.split("</think>", 1)[1]  # thinking leaked into content
-        self.content = content
+        self.content = clean_content(content)
         self.finish_reason = finish_reason  # "stop", "length", "tool_calls", ...
         self.reasoning = reasoning          # thinking text, if the server splits it out
         # Native tool calls, if the server's tool parser extracted them:
@@ -55,36 +52,18 @@ def _headers(cfg: Config) -> dict:
     return h
 
 
-def chat(
-    cfg: Config,
-    messages: list,
-    stop: Optional[List[str]] = None,
-    on_progress: ProgressFn = None,
-    on_retry: Optional[Callable[[str, int, float], None]] = None,
-) -> Reply:
-    """POST to {base_url}/chat/completions and return the reply, retrying on gateway errors."""
-    attempts = cfg.retries + 1
-    for attempt in range(1, attempts + 1):
-        try:
-            return _chat_once(cfg, messages, stop, on_progress)
-        except _Retryable as e:
-            if attempt == attempts:
-                raise LLMError(f"{e} (gave up after {attempts} attempts)") from e
-            wait = min(2 ** attempt, 20)
-            if on_retry:
-                on_retry(str(e), attempt, wait)
-            time.sleep(wait)
-    raise LLMError("unreachable")
+def build_payload(cfg: Config, messages: list, stop: Optional[List[str]] = None,
+                  stream: Optional[bool] = None, temperature: Optional[float] = None) -> dict:
+    """Build the /chat/completions request body, honoring every Config option.
 
-
-def _chat_once(cfg: Config, messages: list, stop, on_progress: ProgressFn) -> Reply:
-    url = cfg.base_url.rstrip("/") + "/chat/completions"
+    web.py and llm.chat share this so request options can't drift between them.
+    """
     payload = {
         "model": cfg.model,
         "messages": messages,
         "max_tokens": cfg.max_tokens,
-        "temperature": cfg.temperature,
-        "stream": cfg.stream,
+        "temperature": cfg.temperature if temperature is None else temperature,
+        "stream": cfg.stream if stream is None else stream,
     }
     if stop:
         payload["stop"] = stop
@@ -97,6 +76,44 @@ def _chat_once(cfg: Config, messages: list, stop, on_progress: ProgressFn) -> Re
             payload.update(json.loads(cfg.extra_body))
         except json.JSONDecodeError as e:
             raise LLMError(f"AGENT_EXTRA_BODY is not valid JSON: {e}") from e
+    return payload
+
+
+def clean_content(content: str) -> str:
+    """Strip control tokens and leaked <think> text from a completed reply."""
+    content = _CONTROL_TOKENS_RE.sub("", content or "")
+    if "</think>" in content and "<think>" not in content:
+        content = content.split("</think>", 1)[1]  # thinking leaked into content
+    return content
+
+
+def chat(
+    cfg: Config,
+    messages: list,
+    stop: Optional[List[str]] = None,
+    on_progress: ProgressFn = None,
+    on_retry: Optional[Callable[[str, int, float], None]] = None,
+    temperature: Optional[float] = None,
+) -> Reply:
+    """POST to {base_url}/chat/completions and return the reply, retrying on gateway errors."""
+    attempts = cfg.retries + 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return _chat_once(cfg, messages, stop, on_progress, temperature)
+        except _Retryable as e:
+            if attempt == attempts:
+                raise LLMError(f"{e} (gave up after {attempts} attempts)") from e
+            wait = min(2 ** attempt, 20)
+            if on_retry:
+                on_retry(str(e), attempt, wait)
+            time.sleep(wait)
+    raise LLMError("unreachable")
+
+
+def _chat_once(cfg: Config, messages: list, stop, on_progress: ProgressFn,
+               temperature: Optional[float] = None) -> Reply:
+    url = cfg.base_url.rstrip("/") + "/chat/completions"
+    payload = build_payload(cfg, messages, stop=stop, temperature=temperature)
 
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers=_headers(cfg), method="POST"
@@ -124,11 +141,18 @@ def _chat_once(cfg: Config, messages: list, stop, on_progress: ProgressFn) -> Re
         raise _Retryable(f"No data from {url} for {cfg.timeout}s ({e.__class__.__name__})") from e
 
 
-def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
-    """Read Server-Sent Events: lines like 'data: {json}' ending with 'data: [DONE]'."""
-    content, reasoning, finish = [], [], ""
-    n_content = n_reasoning = 0
-    tools = {}  # index -> {"name": str, "arguments": str}, built up from deltas
+def iter_stream_events(cfg: Config, resp):
+    """Yield parsed Server-Sent Events from a streaming /chat/completions response.
+
+    Each event is one of:
+      ("content", text)   a piece of the reply
+      ("thinking", text)  a piece of the model's reasoning
+      ("tool", (index, name_delta, args_delta))  a tool-call delta
+      ("finish", reason)  the finish_reason for a choice
+
+    The response is lines like 'data: {json}' ending with 'data: [DONE]'.
+    Shared by llm.chat and web.py so the SSE wire format lives in one place.
+    """
     for raw in resp:
         line = raw.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
@@ -147,29 +171,46 @@ def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
         for choice in chunk.get("choices", []):
             delta = choice.get("delta") or {}
             if delta.get("content"):
-                content.append(delta["content"])
-                n_content += len(delta["content"])
-                if on_progress:
-                    on_progress("writing", n_content)
+                yield ("content", delta["content"])
             think = delta.get("reasoning_content") or delta.get("reasoning")
             if think:
-                reasoning.append(think)
-                n_reasoning += len(think)
-                if on_progress:
-                    on_progress("thinking", n_reasoning)
+                yield ("thinking", think)
             for tc in delta.get("tool_calls") or []:
-                slot = tools.setdefault(tc.get("index", len(tools)), {"name": "", "arguments": ""})
                 fn = tc.get("function") or {}
-                slot["name"] += fn.get("name") or ""
-                args = fn.get("arguments")
-                if isinstance(args, dict):
-                    slot["arguments"] = args
-                elif args:
-                    slot["arguments"] += args
-                if on_progress:
-                    on_progress("calling a tool", len(tools))
+                yield ("tool", (tc.get("index"), fn.get("name"), fn.get("arguments")))
             if choice.get("finish_reason"):
-                finish = choice["finish_reason"]
+                yield ("finish", choice["finish_reason"])
+
+
+def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
+    """Accumulate the shared stream events into a finished Reply."""
+    content, reasoning, finish = [], [], ""
+    n_content = n_reasoning = 0
+    tools = {}  # index -> {"name": str, "arguments": str}, built up from deltas
+    for kind, value in iter_stream_events(cfg, resp):
+        if kind == "content":
+            content.append(value)
+            n_content += len(value)
+            if on_progress:
+                on_progress("writing", n_content)
+        elif kind == "thinking":
+            reasoning.append(value)
+            n_reasoning += len(value)
+            if on_progress:
+                on_progress("thinking", n_reasoning)
+        elif kind == "tool":
+            index, name, args = value
+            slot = tools.setdefault(index if index is not None else len(tools),
+                                    {"name": "", "arguments": ""})
+            slot["name"] += name or ""
+            if isinstance(args, dict):
+                slot["arguments"] = args
+            elif args:
+                slot["arguments"] += args
+            if on_progress:
+                on_progress("calling a tool", len(tools))
+        elif kind == "finish":
+            finish = value
     calls = [tools[i] for i in sorted(tools)]
     return Reply("".join(content), finish, "".join(reasoning), calls)
 
@@ -190,6 +231,20 @@ def _parse_full(cfg: Config, data: dict) -> Reply:
         )
     except (KeyError, IndexError, TypeError) as e:
         raise LLMError(f"Unexpected response shape: {json.dumps(data)[:500]}") from e
+
+
+def open_stream(cfg: Config, messages: list, temperature: Optional[float] = None):
+    """Open a streaming /chat/completions request. Returns the urlopen context manager.
+
+    Use with `iter_stream_events` to consume deltas. Callers that need
+    cancellation between chunks iterate the events themselves (see web.py).
+    """
+    url = cfg.base_url.rstrip("/") + "/chat/completions"
+    payload = build_payload(cfg, messages, stream=True, temperature=temperature)
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode(), headers=_headers(cfg), method="POST"
+    )
+    return urllib.request.urlopen(req, timeout=cfg.timeout)
 
 
 def list_models(cfg: Config) -> list:
