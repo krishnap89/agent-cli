@@ -126,3 +126,43 @@ def _match(candidates: List[str], prefix: str) -> Iterable[Completion]:
     for c in candidates:
         if c.lower().startswith(lower):
             yield Completion(c, start_position=-len(prefix))
+
+
+# The agent REPL (main.py) has a small, fixed set of commands. (command, hint)
+# pairs, kept in the order they're shown in the menu.
+AGENT_COMMANDS = [
+    ("/chat", "chat only, no tools"),
+    ("/agent", "use tools"),
+    ("/review", "code review [target]"),
+    ("/map", "repo map [query]"),
+    ("/notes", "show project notes"),
+    ("/skills", "list skills"),
+    ("/skill", "pin a skill [name|off]"),
+    ("/model", "switch model [name]"),
+    ("/grammar", "fix grammar & spelling"),
+    ("/rephrase", "rewrite more clearly"),
+    ("/tone", "rewrite in a tone <style> <text>"),
+    ("/email", "notes → email"),
+    ("/slack", "notes → Slack message"),
+    ("/clear", "reset history"),
+    ("/exit", "quit"),
+]
+
+
+class AgentCompleter(Completer):
+    """Completes the agent REPL's slash commands, with a hint beside each.
+
+    Only completes the command word itself (the first token). Once a command
+    and a space are typed, it stays out of the way so argument text is free-form.
+    """
+
+    #: read by input_reader to decide whether to pop the menu up without Tab
+    complete_while_typing = True
+
+    def get_completions(self, document: Document, complete_event) -> Iterable[Completion]:
+        text = document.text_before_cursor
+        if not text.startswith("/") or " " in text or "\n" in text:
+            return
+        for cmd, hint in AGENT_COMMANDS:
+            if cmd.startswith(text):
+                yield Completion(cmd, start_position=-len(text), display_meta=hint)

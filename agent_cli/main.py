@@ -6,7 +6,7 @@ from rich.console import Console
 
 from .agent import Agent
 from .config import Config
-from .input_reader import read_message
+from .input_reader import read_message, set_completer
 from .llm import list_models, switch_model
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
 from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
@@ -101,6 +101,8 @@ def main(
                   "Writing: /grammar, /rephrase, /tone <style>, /email, /slack — each takes text "
                   '(inline or a """ block).\n'
                   '""" starts/ends a multi-line message; pastes are kept together.[/dim]\n')
+    from .completer import AgentCompleter
+    set_completer(AgentCompleter())  # type '/' to see the command menu
     while True:
         try:
             color = "blue" if agent.chat_only else "green"

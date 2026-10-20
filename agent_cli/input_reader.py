@@ -159,7 +159,10 @@ def read_message(prompt: str) -> str:
 def _read_with_prompt_toolkit(prompt: str) -> str:
     session = _get_session()
     pt_prompt = _rich_to_pt_html(prompt)
-    text = session.prompt(pt_prompt, completer=_completer, complete_while_typing=False)
+    # A completer can opt into showing the menu as you type (the agent REPL's
+    # command completer does); otherwise the menu waits for Tab (coder REPL).
+    while_typing = getattr(_completer, "complete_while_typing", False)
+    text = session.prompt(pt_prompt, completer=_completer, complete_while_typing=while_typing)
     if text.strip() == BLOCK_MARK:
         return _read_block()
     return text
