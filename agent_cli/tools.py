@@ -102,6 +102,59 @@ TOOL_SCHEMAS = [
         },
     },
     {
+        "name": "apply_patch",
+        "description": "Apply several edits across one or more files in a single atomic step: "
+                       "every edit is checked first, and nothing is written unless all of them "
+                       "match. Each edit replaces an exact, unique string (old_str) in a file with "
+                       "new_str; set old_str to \"\" to create a new file from new_str. Prefer this "
+                       "over repeated edit_file calls when a change touches multiple places.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "old_str": {"type": "string"},
+                            "new_str": {"type": "string"},
+                        },
+                        "required": ["path", "new_str"],
+                    },
+                },
+            },
+            "required": ["edits"],
+        },
+    },
+    {
+        "name": "todo",
+        "description": "Track a multi-step task as a checklist that persists across turns. "
+                       "action='set' replaces the whole list from items (each {text, status} with "
+                       "status one of pending|in_progress|done); action='list' shows the current "
+                       "list. Keep exactly one item in_progress. Use it to plan and show progress "
+                       "on tasks with several steps.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["set", "list"]},
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "status": {"type": "string",
+                                       "enum": ["pending", "in_progress", "done"]},
+                        },
+                        "required": ["text"],
+                    },
+                },
+            },
+            "required": ["action"],
+        },
+    },
+    {
         "name": "run_command",
         "description": "Run a shell command in the working directory. Returns stdout/stderr.",
         "input_schema": {
@@ -131,6 +184,7 @@ class Tools:
         self.root = cfg.workdir.resolve()
         self.repo_map = RepoMap(self.root)
         self._map_built = False
+        self.todos: list[dict] = []  # session task list: {text, status}
 
     def ensure_map(self) -> RepoMap:
         """Build (or refresh from cache) the repo map; cheap after the first time."""
@@ -211,6 +265,63 @@ class Tools:
         p.write_text(text.replace(old_str, new_str), encoding="utf-8")
         return f"Edited {path}"
 
+    def t_apply_patch(self, edits: list) -> str:
+        if not isinstance(edits, list) or not edits:
+            raise ToolError("apply_patch needs a non-empty 'edits' list.")
+        # Phase 1: validate every edit against the current (in-memory) file state.
+        # Later edits to the same file see earlier ones, so a sequence of edits to
+        # one file is checked as it will actually apply.
+        pending: dict[Path, str] = {}   # resolved path -> new full text
+        originals: dict[Path, str] = {}  # resolved path -> on-disk text (for the diff summary)
+        plan = []  # (rel_path, is_new) per edit, for the confirm prompt / summary
+        for i, e in enumerate(edits):
+            if not isinstance(e, dict):
+                raise ToolError(f"edit #{i + 1} is not an object.")
+            path, new_str = e.get("path"), e.get("new_str")
+            old_str = e.get("old_str", "")
+            if not path or new_str is None:
+                raise ToolError(f"edit #{i + 1} needs 'path' and 'new_str'.")
+            p = self._resolve(path)
+            if p not in pending:
+                if p.exists():
+                    originals[p] = pending[p] = p.read_text(encoding="utf-8")
+                else:
+                    originals[p] = None
+                    pending[p] = None  # not yet created
+            is_new = old_str == ""
+            if is_new:
+                if pending[p] is not None:
+                    raise ToolError(f"edit #{i + 1}: {path} already exists; "
+                                    "pass the text to replace in old_str instead of \"\".")
+                pending[p] = new_str
+            else:
+                if pending[p] is None:
+                    raise ToolError(f"edit #{i + 1}: {path} does not exist.")
+                count = pending[p].count(old_str)
+                if count != 1:
+                    raise ToolError(f"edit #{i + 1}: old_str found {count} times in {path}; "
+                                    "it must match exactly once (include surrounding lines "
+                                    "to make it unique).")
+                pending[p] = pending[p].replace(old_str, new_str)
+            plan.append((p.relative_to(self.root).as_posix(), is_new))
+
+        files = {rel for rel, _ in plan}
+        summary = ", ".join(sorted(files))
+        if not self._confirm(f"apply {len(edits)} edit(s) to {len(files)} file(s): {summary}"):
+            return "User denied the patch."
+        # Phase 2: all edits validated — write.
+        for p, text in pending.items():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        created = sorted(rel for rel, is_new in plan if is_new)
+        changed = sorted(f for f in files if f not in created)
+        parts = [f"Applied {len(edits)} edit(s)."]
+        if changed:
+            parts.append("Changed: " + ", ".join(changed))
+        if created:
+            parts.append("Created: " + ", ".join(created))
+        return " ".join(parts)
+
     def t_dependency_graph(self, path: str) -> str:
         rel = self._resolve(path).relative_to(self.root).as_posix()
         return self.ensure_map().deps(rel)
@@ -266,6 +377,36 @@ class Tools:
         if shown < len(hits):
             header += f" (showing {shown}; narrow with path or a more specific pattern)"
         return header + "\n" + "\n".join(out)
+
+    _TODO_STATUSES = {"pending", "in_progress", "done"}
+
+    def _render_todos(self) -> str:
+        if not self.todos:
+            return "(todo list is empty)"
+        marks = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]"}
+        done = sum(1 for t in self.todos if t["status"] == "done")
+        lines = [f"Tasks ({done}/{len(self.todos)} done):"]
+        lines += [f"  {marks[t['status']]} {t['text']}" for t in self.todos]
+        return "\n".join(lines)
+
+    def t_todo(self, action: str, items: list = None) -> str:
+        if action == "list":
+            return self._render_todos()
+        if action != "set":
+            raise ToolError("todo action must be 'set' or 'list'.")
+        if not isinstance(items, list):
+            raise ToolError("todo action='set' needs an 'items' list.")
+        new = []
+        for i, it in enumerate(items):
+            if not isinstance(it, dict) or not it.get("text"):
+                raise ToolError(f"todo item #{i + 1} needs a 'text' field.")
+            status = it.get("status", "pending")
+            if status not in self._TODO_STATUSES:
+                raise ToolError(f"todo item #{i + 1} has invalid status {status!r}; "
+                                "use pending, in_progress or done.")
+            new.append({"text": str(it["text"]), "status": status})
+        self.todos = new
+        return self._render_todos()
 
     def t_run_command(self, command: str) -> str:
         if not self._confirm(f"run `{command}`"):
