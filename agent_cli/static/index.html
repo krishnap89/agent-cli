@@ -355,10 +355,31 @@ input:focus, textarea:focus, select:focus {
   padding: 8px 10px;
   border-radius: 6px;
   overflow-x: auto;
-  margin: 8px 0;
+  margin: 0;
   font-size: 13px;
   line-height: 1.4;
 }
+.code-block {
+  position: relative;
+  margin: 8px 0;
+}
+.code-block .copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface2);
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.code-block:hover .copy-btn { opacity: 1; }
+.code-block .copy-btn:hover { color: var(--text); }
+.code-block .copy-btn.copied { color: var(--green, #3fb950); opacity: 1; }
 .message.assistant code {
   font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
   font-size: 13px;
@@ -660,6 +681,38 @@ inp.addEventListener("keydown", e => {
     e.preventDefault();
     sendMessage();
   }
+});
+
+// ---- copy buttons on code blocks (delegated, so streamed/re-rendered
+// blocks keep working without rebinding) ----
+document.getElementById("messages").addEventListener("click", async e => {
+  const btn = e.target.closest(".copy-btn");
+  if (!btn) return;
+  const code = btn.parentNode.querySelector("code");
+  if (!code) return;
+  const text = code.textContent;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    btn.textContent = "Copied";
+    btn.classList.add("copied");
+  } catch (err) {
+    btn.textContent = "Failed";
+  }
+  setTimeout(() => {
+    btn.textContent = "Copy";
+    btn.classList.remove("copied");
+  }, 1500);
 });
 
 // ---- mode ----
@@ -993,9 +1046,13 @@ function renderMarkdown(text) {
   if (!text) return "";
   let html = escapeHtml(text);
 
-  // code blocks
+  // code blocks (wrapped with a copy button; the raw code is read back from
+  // the <code> element's textContent at copy time, so no double-escaping)
   html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    return '<pre><code>' + code.trimEnd() + '</code></pre>';
+    return '<div class="code-block">' +
+      '<button class="copy-btn" type="button">Copy</button>' +
+      '<pre><code>' + code.trimEnd() + '</code></pre>' +
+      '</div>';
   });
 
   // inline code
