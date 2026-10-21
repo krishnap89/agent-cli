@@ -912,7 +912,7 @@ class TestCollectContext(unittest.TestCase):
 
     def test_includes_target_source(self):
         setup = {"libs": {"junit4", "mockk"}, "dsl": "kotlin", "catalog": None}
-        ctx = collect_context(
+        ctx, _unknown = collect_context(
             self.root,
             "app/src/main/java/com/example/app/LoginViewModel.kt",
             "LoginViewModel",
@@ -931,7 +931,7 @@ class TestCollectContext(unittest.TestCase):
 
     def test_respects_budget(self):
         setup = {"libs": set(), "dsl": "kotlin", "catalog": None}
-        ctx = collect_context(
+        ctx, _unknown = collect_context(
             self.root,
             "app/src/main/java/com/example/app/LoginViewModel.kt",
             "LoginViewModel",
@@ -946,6 +946,118 @@ class TestCollectContext(unittest.TestCase):
             200,
         )
         self.assertIn("truncated", ctx)
+
+    def test_reports_unresolved_dependency_type(self):
+        # Empty repo map: the LoginRepository constructor dependency cannot be
+        # resolved, so it should be reported as unknown and flagged in context.
+        setup = {"libs": {"junit4", "mockk"}, "dsl": "kotlin", "catalog": None}
+        ctx, unknown = collect_context(
+            self.root,
+            "app/src/main/java/com/example/app/LoginViewModel.kt",
+            "LoginViewModel",
+            None,
+            "viewmodel",
+            setup,
+            [],
+            [],
+            "",
+            None,
+            {},
+            48000,
+        )
+        self.assertIn("LoginRepository", unknown)
+        self.assertIn("Unresolved types", ctx)
+        self.assertIn("Do not guess", ctx)
+
+
+class TestExtractCodeBlock(unittest.TestCase):
+    """The write-step fallback for models that skip the SEARCH/REPLACE format."""
+
+    def test_single_block_with_filename_header(self):
+        from agent_cli.coder import extract_code_block
+        reply = (
+            "I'll create the test cases.\n\n"
+            "app/src/test/.../FooTest.kt\n"
+            "```kotlin\n"
+            "package com.example\n\n"
+            "class FooTest {\n}\n"
+            "```\n"
+        )
+        body = extract_code_block(reply)
+        self.assertIsNotNone(body)
+        self.assertTrue(body.startswith("package com.example"))
+        self.assertTrue(body.rstrip().endswith("}"))
+
+    def test_no_block_returns_none(self):
+        from agent_cli.coder import extract_code_block
+        self.assertIsNone(extract_code_block("just prose, no code here"))
+
+    def test_multiple_blocks_returns_none(self):
+        # Ambiguous: don't guess which block is the whole file.
+        from agent_cli.coder import extract_code_block
+        reply = "```kotlin\na\n```\nand then\n```kotlin\nb\n```"
+        self.assertIsNone(extract_code_block(reply))
+
+    def test_tilde_fence(self):
+        from agent_cli.coder import extract_code_block
+        self.assertEqual(extract_code_block("~~~kotlin\nX\n~~~"), "X")
+
+    def test_search_replace_reply_is_left_for_the_parser(self):
+        # A proper SEARCH/REPLACE reply has markers but, as a fenced block, its
+        # body is the markers+code — the real parser handles it, not this
+        # fallback. We only assert extract doesn't crash on it.
+        from agent_cli.coder import extract_code_block
+        reply = "foo.kt\n```kotlin\n<<<<<<< SEARCH\n=======\nnew\n>>>>>>> REPLACE\n```"
+        body = extract_code_block(reply)
+        self.assertIn("REPLACE", body)
+
+
+class TestExtractFileAfterHeader(unittest.TestCase):
+    """Recovery when the model dumps a file path + raw source with no fence."""
+
+    PATH = "app/src/test/java/com/example/FooTest.kt"
+
+    def test_unfenced_path_then_source(self):
+        from agent_cli.coder import extract_file_after_header
+        reply = (
+            "I'll add the tests to the existing FooTest.kt file.\n\n"
+            + self.PATH + " package com.example\n\n"
+            "import org.junit.Test\n\n"
+            "class FooTest {\n    @Test fun t() {}\n}\n"
+        )
+        body = extract_file_after_header(reply, self.PATH)
+        self.assertIsNotNone(body)
+        self.assertTrue(body.startswith("package com.example"))
+        self.assertTrue(body.rstrip().endswith("}"))
+
+    def test_basename_only_header(self):
+        from agent_cli.coder import extract_file_after_header
+        reply = "Here: FooTest.kt\npackage com.x\nclass A"
+        self.assertEqual(
+            extract_file_after_header(reply, self.PATH),
+            "package com.x\nclass A",
+        )
+
+    def test_basename_in_prose_skipped_for_real_header(self):
+        # Basename appears first inside a sentence, then the real header later.
+        from agent_cli.coder import extract_file_after_header
+        reply = (
+            "I will update FooTest.kt now.\n\n"
+            "FooTest.kt\npackage com.y\nclass B\n"
+        )
+        self.assertEqual(
+            extract_file_after_header(reply, self.PATH),
+            "package com.y\nclass B",
+        )
+
+    def test_prose_only_mention_rejected(self):
+        from agent_cli.coder import extract_file_after_header
+        reply = "I would create " + self.PATH + " with five tests, but here's my plan instead."
+        self.assertIsNone(extract_file_after_header(reply, self.PATH))
+
+    def test_path_absent_returns_none(self):
+        from agent_cli.coder import extract_file_after_header
+        self.assertIsNone(extract_file_after_header("package com.z\nclass C", self.PATH))
 
 
 if __name__ == "__main__":

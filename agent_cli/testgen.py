@@ -588,8 +588,13 @@ def collect_context(
     existing_test_path: Optional[str],
     repo_map_files: Dict[str, Any],
     budget: int,
-) -> str:
-    """Build the context string for the model, within budget."""
+) -> Tuple[str, List[str]]:
+    """Build the context string for the model, within budget.
+
+    Returns (context_string, unresolved_dependency_type_names). The unresolved
+    types are constructor dependencies whose source could not be found, so the
+    caller can ask the user for them instead of letting the model guess.
+    """
     parts = []  # type: List[str]
 
     # Target class source
@@ -602,10 +607,22 @@ def collect_context(
 
     # Constructor dependency outlines
     dep_types = extract_constructor_types(root / target_path)
+    unknown_types = []  # type: List[str]
     for dtype in dep_types[:6]:
         outline_text = _find_type_outline(dtype, repo_map_files, root)
         if outline_text:
             parts.append(f"# Dependency: {dtype}\n```kotlin\n{outline_text}\n```")
+        else:
+            unknown_types.append(dtype)
+
+    # Flag types we could not resolve so the model asks rather than guesses
+    if unknown_types:
+        names = ", ".join(unknown_types)
+        parts.append(
+            f"# Unresolved types: {names}\n"
+            "Their source was not found. Do not guess their fields, constructors "
+            "or API. Ask for the source of any you need."
+        )
 
     # Detected libraries
     libs_list = ", ".join(sorted(setup["libs"])) if setup["libs"] else "(none)"
@@ -642,7 +659,7 @@ def collect_context(
     result = "\n\n".join(parts)
     if len(result) > budget:
         result = result[:budget] + "\n...(truncated)..."
-    return result
+    return result, unknown_types
 
 
 def _extract_method_context(text: str, class_name: str, method: str) -> str:
@@ -719,6 +736,17 @@ Reuse these existing helpers instead of writing your own: {helpers}.
 Only edit {test_path}. Never change production code.
 One behaviour per test. Implement exactly the approved test cases.
 Use runTest for suspend functions.
+
+Mock only collaborators that have behaviour (repositories, use cases, data
+sources). For data/value holders (data classes, enums, sealed types), construct
+real instances instead of mocking them.
+
+Only use types, constructors, properties and functions whose definition you have
+been given above or that come from the allowed libraries or the Kotlin/Android
+standard library. Do NOT invent fields, constructor parameters, enum entries or
+function signatures for a type you have not seen. If a test case needs a type
+whose shape was not provided, stop and ask for that type's source instead of
+guessing. It is better to ask than to hallucinate an API.
 
 Test cases to implement:
 {plan}
