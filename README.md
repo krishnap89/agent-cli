@@ -73,6 +73,7 @@ repo map and settings:
   closest real lines so the model can fix them (AGENT_MAX_REFLECTIONS, default 2).
 - If the model names a repo file that isn't in the chat, coder offers to add
   it and re-send your request.
+- /micro <request> runs the request through the micro-agent loop (see below).
 - /undo, /diff, /run <cmd> (optionally share output), /tokens, /map, /clear, /reset.
 - /lint runs syntax checks; /test runs AGENT_TEST_CMD; /autotest on|off toggles auto-test after edits.
 - /review [target] reviews code changes (see below).
@@ -99,6 +100,46 @@ rounds, default 2).
 Per-extension lint commands (`AGENT_LINT_CMD_<EXT>`, e.g. `AGENT_LINT_CMD_KT`)
 run on the changed files of that extension only. Lookup order per file:
 `AGENT_LINT_CMD_<EXT>`, then `AGENT_LINT_CMD`, then built-in check.
+
+## Micro-agent loop (`/micro`)
+`/micro <request>` (and `coder --micro "<request>"`) runs an edit request
+through a small pipeline of focused roles instead of one long chat. Each role
+sees only its own inputs — there is no shared history to drift — and produces a
+strict format that is parsed in Python; a bad-format reply is retried once, then
+the run stops with a clear message.
+
+    Locator -> Planner -> for each step:
+        Editor -> Checker -> (Fixer -> Checker)* -> Reviewer
+    -> Summarizer
+
+- **Locator** picks the files to edit from the repo map (it may name a new file
+  to create, as long as the path is sane — a known source extension inside an
+  existing directory; wild paths are ignored). **Planner** breaks the request
+  into small ordered steps, and each step's files are validated against the
+  Locator's set: a step referencing a path that was never located has it
+  dropped (and the plan is re-requested once if nothing valid is left), so steps
+  can't send the Editor after an invented file.
+- For each step, **Editor** writes SEARCH/REPLACE blocks, **Checker** (no LLM:
+  built-in lint + the Gradle compile check already used after normal edits)
+  verifies them, and **Fixer** repairs failures for up to `AGENT_FIX_ROUNDS`
+  rounds. The step stops early if the *same* check error comes back twice.
+  Edits are scoped to the step's files: a block aimed at any other path (an
+  invented path, or the format example) is rejected and sent back, never written.
+- **Reviewer** judges each step's diff against its intent. A CHANGES verdict
+  feeds its note back to the Fixer (so "compiles but doesn't match the step" is
+  caught too), up to `AGENT_REVIEW_ROUNDS` extra passes; the edits are kept
+  either way. **Summarizer** writes the final one-paragraph summary from the
+  actual diff.
+- **Fast path:** if the request names exactly one file already in the chat, the
+  Locator and Planner are skipped and the request runs as a single step.
+- The active role and round are shown in the terminal. Every role call is logged
+  to `.agent-cache/runs/<timestamp>.jsonl` (input size, output, duration).
+- The whole run is one undo snapshot: a single `/undo` reverts everything.
+
+```
+AGENT_FIX_ROUNDS=2      # Fixer rounds per step for a failed check (default: AGENT_MAX_FIX_ATTEMPTS)
+AGENT_REVIEW_ROUNDS=1   # extra Fixer passes driven by a Reviewer CHANGES verdict (0 disables)
+```
 
 ## Kotlin / Android support
 For Kotlin Android projects built with Gradle, coder detects modules

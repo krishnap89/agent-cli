@@ -168,6 +168,7 @@ HELP = """Commands:
   /ask <question>      one question without edits (or /mode ask)
   /code <request>      one request with edits (or /mode code)
   /mode ask|code       switch mode
+  /micro <request>     run the request through the micro-agent loop
   /diff                show the last edits
   /undo                undo the last edits
   /run <command>       run a command; optionally share output with the model
@@ -1462,6 +1463,14 @@ class Coder:
         for d in self.last_diffs:
             console.print(Syntax(d, "diff", theme="ansi_dark"))
 
+    def micro(self, request: str) -> None:
+        """Run a request through the micro-agent loop (Locator/Planner/Editor/...)."""
+        if self.mode != "code":
+            console.print("[yellow]/micro only runs in code mode.[/yellow]")
+            return
+        from .micro import MicroOrchestrator
+        MicroOrchestrator(self).run(request)
+
     def run(self, command: str) -> None:
         failed = True
         try:
@@ -1491,6 +1500,7 @@ def main(
     files: Optional[List[str]] = typer.Argument(None, help="Files to add to the chat."),
     read: Optional[List[str]] = typer.Option(None, "--read", "-r", help="Read-only files."),
     message: Optional[str] = typer.Option(None, "--message", help="Send one message and exit."),
+    micro: Optional[str] = typer.Option(None, "--micro", help="Run one request through the micro-agent loop and exit."),
     ask: bool = typer.Option(False, "--ask", help="Start in ask mode (no edits)."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmations."),
     model: Optional[str] = typer.Option(None, "--model", "-m"),
@@ -1530,6 +1540,10 @@ def main(
 
     if doc is not None:
         coder.doc_gen(doc, update_mode=doc_update)
+        return
+
+    if micro is not None:
+        coder.micro(micro)
         return
 
     if message:
@@ -1595,6 +1609,8 @@ def main(
                 coder.send(arg, mode="ask") if arg else setattr(coder, "mode", "ask")
             elif cmd == "/code":
                 coder.send(arg, mode="code") if arg else setattr(coder, "mode", "code")
+            elif cmd == "/micro":
+                coder.micro(arg) if arg else console.print("[yellow]Usage: /micro <request>[/yellow]")
             elif cmd == "/undo":
                 coder.undo()
             elif cmd == "/diff":
