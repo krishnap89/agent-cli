@@ -67,6 +67,17 @@ def main(
     skills = load_skills(cfg.workdir)
     pinned_skill = None  # type: ignore
 
+    # The test-gen / doc-gen pipelines live on Coder. The agent command builds
+    # one lazily (it detects Android and indexes, so we avoid that cost unless a
+    # pipeline is actually invoked) and reuses it across calls.
+    _coder_holder = {}  # type: dict
+
+    def _get_coder():
+        if "c" not in _coder_holder:
+            from .coder import Coder
+            _coder_holder["c"] = Coder(cfg)
+        return _coder_holder["c"]
+
     def _prepare(text: str) -> str:
         """Inline any @file mentions, then append skill context."""
         text, notes = expand_mentions(text, cfg.workdir)
@@ -92,8 +103,15 @@ def main(
                 console.print(f"[dim]Skill: {skill.name}[/dim]")
         return "".join(parts)
 
+    def _route_or_ask(text: str) -> None:
+        """Send `text` to a pipeline if it's a test/doc request, else the agent."""
+        from .intent import route as route_intent
+        if not chat_only and route_intent(cfg, _get_coder(), text, console):
+            return
+        agent.ask(_prepare(text))
+
     if prompt:
-        agent.ask(_prepare(prompt))
+        _route_or_ask(prompt)
         return
 
     console.print(f"[bold]agent[/bold] · {cfg.model} @ {cfg.base_url} · {cfg.workdir}")
@@ -105,6 +123,7 @@ def main(
         console.print(f"[dim]Skills: {len(skills)} loaded[/dim]")
     console.print(f"[dim]Mode: {agent.mode_name}. "
                   "/chat = chat only, /agent = use tools, /review [target] = code review, "
+                  "/test-gen <class> = generate tests, /doc <target> = generate docs, "
                   "/map [query] = repo map, /notes = show notes, /skills = list skills, "
                   "/model [name] = switch model, /clear = reset, /exit = quit.\n"
                   "Writing: /grammar, /rephrase, /tone <style>, /email, /slack — each takes text "
@@ -183,18 +202,36 @@ def main(
             agent.reset()
             console.print("[dim]History cleared.[/dim]")
             continue
+        if text.startswith("/test-gen"):
+            arg = text[len("/test-gen"):].strip()
+            parts = arg.split()
+            if not parts:
+                console.print("[yellow]Usage: /test-gen <class|file> [method][/yellow]")
+            else:
+                _get_coder().test_gen(parts[0], parts[1] if len(parts) > 1 else "")
+            continue
+        if text.startswith("/doc"):
+            arg = text[len("/doc"):].strip()
+            doc_update = "--update" in arg
+            doc_target = arg.replace("--update", "").strip()
+            if not doc_target:
+                console.print("[yellow]Usage: /doc <class|file|folder> [--update][/yellow]")
+            else:
+                _get_coder().doc_gen(doc_target, update_mode=doc_update)
+            continue
         if text.startswith("/"):
             # Reached here with a leading slash means no command above matched,
             # so it's a typo'd/unknown command (e.g. /grammer). Warn instead of
             # silently sending it to the model as a chat message.
             unknown = text.split(None, 1)[0]
             console.print(f"[yellow]Unknown command: {unknown}[/yellow]")
-            console.print("[dim]Commands: /chat /agent /review /map /notes /skills /skill "
-                          "/model /clear /exit · writing: /grammar /rephrase /tone /email /slack"
+            console.print("[dim]Commands: /chat /agent /review /test-gen /doc /map /notes "
+                          "/skills /skill /model /clear /exit · writing: /grammar /rephrase "
+                          "/tone /email /slack"
                           "\nTo send a message starting with '/', rephrase it.[/dim]")
             continue
         try:
-            agent.ask(_prepare(text))
+            _route_or_ask(text)
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
         console.print()

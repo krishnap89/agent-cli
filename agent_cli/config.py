@@ -40,6 +40,10 @@ class Config:
     doc_visibility: str = os.getenv("AGENT_DOC_VISIBILITY", "internal")  # public|internal
     doc_per_step: int = int(os.getenv("AGENT_DOC_PER_STEP", "8"))
     doc_max_fix: int = int(os.getenv("AGENT_DOC_MAX_FIX", "2"))
+    # Route plain-language messages like "add tests for Foo" to /test-gen or
+    # /doc (after a y/n confirm) via one cheap classifier call. Set to 0 to send
+    # every non-slash message straight to the normal loop.
+    intent_routing: bool = os.getenv("AGENT_INTENT_ROUTING", "1") not in ("0", "false")
     notes_enabled: bool = os.getenv("AGENT_NOTES", "1") not in ("0", "false")
     notes_file: str = os.getenv("AGENT_NOTES_FILE", "")
     notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))
