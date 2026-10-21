@@ -20,6 +20,7 @@ from agent_cli.android import (
     map_file_to_module,
     module_display_name,
     parse_kotlin_errors,
+    parse_product_flavors,
     run_gradle,
 )
 from agent_cli.checks import builtin_lint, ext_lint_cmd
@@ -264,6 +265,70 @@ class TestCompileTasks(unittest.TestCase):
             ["gradle/libs.versions.toml"], self.modules, "Debug"
         )
         self.assertTrue(is_bc)
+
+    def test_flavored_module_qualifies_variant(self):
+        """A module with product flavors uses a flavor-qualified compile task."""
+        modules = {":app": {"path": "app", "android": True,
+                             "flavors": ["dev", "qa", "prod"]}}
+        tasks, _ = compile_tasks(["app/src/main/kotlin/App.kt"], modules, "Debug")
+        self.assertEqual(tasks, [":app:compileDevDebugKotlin"])
+
+    def test_flavored_module_xml_resources(self):
+        modules = {":app": {"path": "app", "android": True, "flavors": ["dev"]}}
+        tasks, _ = compile_tasks(["app/src/main/res/layout/a.xml"], modules, "Debug")
+        self.assertEqual(tasks, [":app:processDevDebugResources"])
+
+    def test_explicit_flavor_variant_not_double_prefixed(self):
+        """An already flavor-qualified variant is left untouched."""
+        modules = {":app": {"path": "app", "android": True,
+                             "flavors": ["dev", "prod"]}}
+        tasks, _ = compile_tasks(["app/src/main/kotlin/App.kt"], modules, "ProdRelease")
+        self.assertEqual(tasks, [":app:compileProdReleaseKotlin"])
+
+    def test_no_flavors_unchanged(self):
+        """Modules without flavors keep the bare build-type task."""
+        modules = {":app": {"path": "app", "android": True, "flavors": []}}
+        tasks, _ = compile_tasks(["app/src/main/kotlin/App.kt"], modules, "Debug")
+        self.assertEqual(tasks, [":app:compileDebugKotlin"])
+
+
+class TestParseProductFlavors(unittest.TestCase):
+    def test_kotlin_dsl_create(self):
+        text = '''
+        android {
+            flavorDimensions += "environment"
+            productFlavors {
+                create("dev") { dimension = "environment" }
+                create("qa") { dimension = "environment" }
+                create("prod") { dimension = "environment" }
+            }
+        }
+        '''
+        self.assertEqual(parse_product_flavors(text), ["dev", "qa", "prod"])
+
+    def test_kotlin_dsl_register_and_getbyname(self):
+        text = '''
+        productFlavors {
+            register("free") { }
+            getByName("paid") { }
+        }
+        '''
+        self.assertEqual(parse_product_flavors(text), ["free", "paid"])
+
+    def test_groovy_dsl_bare_names(self):
+        text = '''
+        android {
+            productFlavors {
+                dev { dimension "environment" }
+                prod { dimension "environment" }
+            }
+        }
+        '''
+        self.assertEqual(parse_product_flavors(text), ["dev", "prod"])
+
+    def test_no_flavors(self):
+        self.assertEqual(parse_product_flavors("android { }"), [])
+        self.assertEqual(parse_product_flavors(""), [])
 
 
 class TestParseKotlinErrors(unittest.TestCase):
