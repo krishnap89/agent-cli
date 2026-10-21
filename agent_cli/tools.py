@@ -1,3 +1,4 @@
+import difflib
 import subprocess
 from pathlib import Path
 
@@ -78,8 +79,10 @@ TOOL_SCHEMAS = [
     },
     {
         "name": "search",
-        "description": "Find where a class, function or text appears in the code. Plain text by "
-                       "default (e.g. 'LoginViewModel' or 'fun login('); set regex=true for a regex. "
+        "description": "Find where a class, function or text appears in the code, and also files "
+                       "whose name matches the pattern (so 'agent.py' finds the file even if no code "
+                       "mentions it). Plain text by default (e.g. 'LoginViewModel' or 'fun login('); "
+                       "set regex=true for a regex (filename matching is skipped in regex mode). "
                        "Optional path limits it to a folder. Skips build output.",
         "input_schema": {
             "type": "object",
@@ -99,6 +102,59 @@ TOOL_SCHEMAS = [
             "type": "object",
             "properties": {"path": {"type": "string"}},
             "required": ["path"],
+        },
+    },
+    {
+        "name": "apply_patch",
+        "description": "Apply several edits across one or more files in a single atomic step: "
+                       "every edit is checked first, and nothing is written unless all of them "
+                       "match. Each edit replaces an exact, unique string (old_str) in a file with "
+                       "new_str; set old_str to \"\" to create a new file from new_str. Prefer this "
+                       "over repeated edit_file calls when a change touches multiple places.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "old_str": {"type": "string"},
+                            "new_str": {"type": "string"},
+                        },
+                        "required": ["path", "new_str"],
+                    },
+                },
+            },
+            "required": ["edits"],
+        },
+    },
+    {
+        "name": "todo",
+        "description": "Track a multi-step task as a checklist that persists across turns. "
+                       "action='set' replaces the whole list from items (each {text, status} with "
+                       "status one of pending|in_progress|done); action='list' shows the current "
+                       "list. Keep exactly one item in_progress. Use it to plan and show progress "
+                       "on tasks with several steps.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["set", "list"]},
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "status": {"type": "string",
+                                       "enum": ["pending", "in_progress", "done"]},
+                        },
+                        "required": ["text"],
+                    },
+                },
+            },
+            "required": ["action"],
         },
     },
     {
@@ -131,6 +187,9 @@ class Tools:
         self.root = cfg.workdir.resolve()
         self.repo_map = RepoMap(self.root)
         self._map_built = False
+        self.todos: list[dict] = []  # session task list: {text, status}
+
+    _DIFF_MAX_LINES = 60  # lines of a diff shown before a write is confirmed
 
     def ensure_map(self) -> RepoMap:
         """Build (or refresh from cache) the repo map; cheap after the first time."""
@@ -149,6 +208,43 @@ class Tools:
             return True
         return Confirm.ask(f"[yellow]Allow:[/yellow] {action}", default=True)
 
+    def _show_diff(self, rel: str, old_text: str, new_text: str) -> None:
+        """Print a colored, line-capped unified diff before a write is confirmed,
+        so the user sees what will change instead of approving blind."""
+        if self.cfg.auto_approve:
+            return  # no human to show it to
+        if old_text == new_text:
+            console.print(f"[dim]{rel}: no change[/dim]")
+            return
+        label = "new file" if old_text == "" else rel
+        diff = difflib.unified_diff(
+            old_text.splitlines(), new_text.splitlines(),
+            fromfile=label, tofile=label, lineterm="", n=2,
+        )
+        adds = dels = shown = 0
+        body = []
+        for line in diff:
+            if line.startswith(("---", "+++")):
+                continue
+            if line.startswith("+"):
+                adds += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                dels += 1
+            if shown < self._DIFF_MAX_LINES:
+                if line.startswith("@@"):
+                    body.append(f"[cyan]{line}[/cyan]")
+                elif line.startswith("+"):
+                    body.append(f"[green]{line}[/green]")
+                elif line.startswith("-"):
+                    body.append(f"[red]{line}[/red]")
+                else:
+                    body.append(f"[dim]{line}[/dim]")
+                shown += 1
+        console.print(f"[yellow]~ {rel}[/yellow] [dim](+{adds} -{dels})[/dim]")
+        console.print("\n".join(body))
+        if shown >= self._DIFF_MAX_LINES:
+            console.print(f"[dim]... diff truncated ({self._DIFF_MAX_LINES} lines shown)[/dim]")
+
     def run(self, name: str, args: dict) -> str:
         fn = getattr(self, f"t_{name}", None)
         if fn is None:
@@ -165,7 +261,7 @@ class Tools:
         return "\n".join(f"{e.name}/" if e.is_dir() else e.name for e in entries) or "(empty)"
 
     def t_read_file(self, path: str, start_line: int = None, end_line: int = None) -> str:
-        lines = self._resolve(path).read_text(errors="replace").splitlines()
+        lines = self._resolve(path).read_text(encoding="utf-8", errors="replace").splitlines()
         total = len(lines)
         max_lines = 400
         start = max(int(start_line or 1), 1)
@@ -194,26 +290,111 @@ class Tools:
 
     def t_write_file(self, path: str, content: str) -> str:
         p = self._resolve(path)
+        old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+        self._show_diff(path, old, content)
         if not self._confirm(f"write {path} ({len(content)} chars)"):
             return "User denied the write."
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(content)
+        p.write_text(content, encoding="utf-8")
         return f"Wrote {path}"
 
     def t_edit_file(self, path: str, old_str: str, new_str: str) -> str:
         p = self._resolve(path)
-        text = p.read_text()
+        text = p.read_text(encoding="utf-8")
         count = text.count(old_str)
         if count != 1:
             raise ToolError(f"old_str found {count} times in {path}; it must be unique.")
+        self._show_diff(path, text, text.replace(old_str, new_str))
         if not self._confirm(f"edit {path}"):
             return "User denied the edit."
-        p.write_text(text.replace(old_str, new_str))
+        p.write_text(text.replace(old_str, new_str), encoding="utf-8")
         return f"Edited {path}"
+
+    def t_apply_patch(self, edits: list) -> str:
+        if not isinstance(edits, list) or not edits:
+            raise ToolError("apply_patch needs a non-empty 'edits' list.")
+        # Phase 1: validate every edit against the current (in-memory) file state.
+        # Later edits to the same file see earlier ones, so a sequence of edits to
+        # one file is checked as it will actually apply.
+        pending: dict[Path, str] = {}   # resolved path -> new full text
+        originals: dict[Path, str] = {}  # resolved path -> on-disk text (for the diff summary)
+        plan = []  # (rel_path, is_new) per edit, for the confirm prompt / summary
+        for i, e in enumerate(edits):
+            if not isinstance(e, dict):
+                raise ToolError(f"edit #{i + 1} is not an object.")
+            path, new_str = e.get("path"), e.get("new_str")
+            old_str = e.get("old_str", "")
+            if not path or new_str is None:
+                raise ToolError(f"edit #{i + 1} needs 'path' and 'new_str'.")
+            p = self._resolve(path)
+            if p not in pending:
+                if p.exists():
+                    originals[p] = pending[p] = p.read_text(encoding="utf-8")
+                else:
+                    originals[p] = None
+                    pending[p] = None  # not yet created
+            is_new = old_str == ""
+            if is_new:
+                if pending[p] is not None:
+                    raise ToolError(f"edit #{i + 1}: {path} already exists; "
+                                    "pass the text to replace in old_str instead of \"\".")
+                pending[p] = new_str
+            else:
+                if pending[p] is None:
+                    raise ToolError(f"edit #{i + 1}: {path} does not exist.")
+                count = pending[p].count(old_str)
+                if count != 1:
+                    raise ToolError(f"edit #{i + 1}: old_str found {count} times in {path}; "
+                                    "it must match exactly once (include surrounding lines "
+                                    "to make it unique).")
+                pending[p] = pending[p].replace(old_str, new_str)
+            plan.append((p.relative_to(self.root).as_posix(), is_new))
+
+        files = {rel for rel, _ in plan}
+        summary = ", ".join(sorted(files))
+        for p, text in pending.items():
+            self._show_diff(p.relative_to(self.root).as_posix(),
+                            originals[p] or "", text)
+        if not self._confirm(f"apply {len(edits)} edit(s) to {len(files)} file(s): {summary}"):
+            return "User denied the patch."
+        # Phase 2: all edits validated — write.
+        for p, text in pending.items():
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(text, encoding="utf-8")
+        created = sorted(rel for rel, is_new in plan if is_new)
+        changed = sorted(f for f in files if f not in created)
+        parts = [f"Applied {len(edits)} edit(s)."]
+        if changed:
+            parts.append("Changed: " + ", ".join(changed))
+        if created:
+            parts.append("Created: " + ", ".join(created))
+        return " ".join(parts)
 
     def t_dependency_graph(self, path: str) -> str:
         rel = self._resolve(path).relative_to(self.root).as_posix()
         return self.ensure_map().deps(rel)
+
+    def _find_files(self, pattern: str, rel: str) -> list:
+        """Paths whose name/path contains `pattern` (case-insensitive).
+
+        Content search greps file *contents*, so a query that is really a
+        filename ('agent.py') finds nothing useful. Matching paths too means
+        'where is X.py' works whether X.py is referenced in code or not.
+        """
+        in_git = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=self.root,
+                                capture_output=True, text=True).returncode == 0
+        if in_git:
+            r = subprocess.run(["git", "ls-files", "--cached", "--others",
+                                "--exclude-standard", "--", rel],
+                               cwd=self.root, capture_output=True, text=True, timeout=30)
+            paths = r.stdout.splitlines()
+        else:
+            base = self._resolve(rel)
+            paths = [p.relative_to(self.root).as_posix() for p in base.rglob("*")
+                     if p.is_file() and not any(part in SEARCH_SKIP_DIRS
+                                                for part in p.relative_to(self.root).parts)]
+        needle = pattern.lower()
+        return [p for p in paths if needle in p.lower()][:SEARCH_MAX_LINES]
 
     def t_search(self, pattern: str, path: str = ".", regex=False) -> str:
         if isinstance(regex, str):  # small models sometimes send "true"
@@ -243,8 +424,13 @@ class Tools:
             file = line.split(":", 1)[0]
             if not any(part in SEARCH_SKIP_DIRS for part in file.split("/")):
                 hits.append(line)
+        file_matches = [] if regex else self._find_files(pattern, rel)
         if not hits:
             where = "the project" if rel == "." else rel
+            if file_matches:
+                listed = "\n".join(f"  {f}" for f in file_matches)
+                return (f"No file *contents* match {pattern!r}, but it looks like a filename. "
+                        f"{len(file_matches)} file(s) have it in their path:\n{listed}")
             return (f"No matches for {pattern!r} in {where}. Try a shorter name, another spelling, "
                     "or repo_map(query).")
 
@@ -265,7 +451,42 @@ class Tools:
         header = f"{len(hits)} matches in {len(by_file)} files"
         if shown < len(hits):
             header += f" (showing {shown}; narrow with path or a more specific pattern)"
-        return header + "\n" + "\n".join(out)
+        result = header + "\n" + "\n".join(out)
+        extra = [f for f in file_matches if f not in by_file]
+        if extra:
+            result += ("\n\nFiles whose name also matches:\n"
+                       + "\n".join(f"  {f}" for f in extra))
+        return result
+
+    _TODO_STATUSES = {"pending", "in_progress", "done"}
+
+    def _render_todos(self) -> str:
+        if not self.todos:
+            return "(todo list is empty)"
+        marks = {"pending": "[ ]", "in_progress": "[~]", "done": "[x]"}
+        done = sum(1 for t in self.todos if t["status"] == "done")
+        lines = [f"Tasks ({done}/{len(self.todos)} done):"]
+        lines += [f"  {marks[t['status']]} {t['text']}" for t in self.todos]
+        return "\n".join(lines)
+
+    def t_todo(self, action: str, items: list = None) -> str:
+        if action == "list":
+            return self._render_todos()
+        if action != "set":
+            raise ToolError("todo action must be 'set' or 'list'.")
+        if not isinstance(items, list):
+            raise ToolError("todo action='set' needs an 'items' list.")
+        new = []
+        for i, it in enumerate(items):
+            if not isinstance(it, dict) or not it.get("text"):
+                raise ToolError(f"todo item #{i + 1} needs a 'text' field.")
+            status = it.get("status", "pending")
+            if status not in self._TODO_STATUSES:
+                raise ToolError(f"todo item #{i + 1} has invalid status {status!r}; "
+                                "use pending, in_progress or done.")
+            new.append({"text": str(it["text"]), "status": status})
+        self.todos = new
+        return self._render_todos()
 
     def t_run_command(self, command: str) -> str:
         if not self._confirm(f"run `{command}`"):

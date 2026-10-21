@@ -6,11 +6,13 @@ from rich.console import Console
 
 from .agent import Agent
 from .config import Config
-from .input_reader import read_message
-from .llm import list_models
+from .input_reader import read_message, set_completer
+from .mentions import expand as expand_mentions
+from .llm import list_models, switch_model
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
 from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
+from .writing import handle as handle_writing
 
 app = typer.Typer(add_completion=False)
 console = Console()
@@ -65,6 +67,25 @@ def main(
     skills = load_skills(cfg.workdir)
     pinned_skill = None  # type: ignore
 
+    # The test-gen / doc-gen pipelines live on Coder. The agent command builds
+    # one lazily (it detects Android and indexes, so we avoid that cost unless a
+    # pipeline is actually invoked) and reuses it across calls.
+    _coder_holder = {}  # type: dict
+
+    def _get_coder():
+        if "c" not in _coder_holder:
+            from .coder import Coder
+            _coder_holder["c"] = Coder(cfg)
+        return _coder_holder["c"]
+
+    def _prepare(text: str) -> str:
+        """Inline any @file mentions, then append skill context."""
+        text, notes = expand_mentions(text, cfg.workdir)
+        for note in notes:
+            color = "dim" if note.startswith("attached") else "yellow"
+            console.print(f"[{color}]{note}[/{color}]")
+        return _augment_with_skills(text)
+
     def _augment_with_skills(text: str) -> str:
         """Append skill context to the user message for the agent."""
         nonlocal pinned_skill
@@ -82,8 +103,15 @@ def main(
                 console.print(f"[dim]Skill: {skill.name}[/dim]")
         return "".join(parts)
 
+    def _route_or_ask(text: str) -> None:
+        """Send `text` to a pipeline if it's a test/doc request, else the agent."""
+        from .intent import route as route_intent
+        if not chat_only and route_intent(cfg, _get_coder(), text, console):
+            return
+        agent.ask(_prepare(text))
+
     if prompt:
-        agent.ask(_augment_with_skills(prompt))
+        _route_or_ask(prompt)
         return
 
     console.print(f"[bold]agent[/bold] · {cfg.model} @ {cfg.base_url} · {cfg.workdir}")
@@ -95,9 +123,17 @@ def main(
         console.print(f"[dim]Skills: {len(skills)} loaded[/dim]")
     console.print(f"[dim]Mode: {agent.mode_name}. "
                   "/chat = chat only, /agent = use tools, /review [target] = code review, "
+                  "/test-gen <class> = generate tests, /doc <target> = generate docs, "
                   "/map [query] = repo map, /notes = show notes, /skills = list skills, "
-                  "/clear = reset, /exit = quit.\n"
+                  "/model [name] = switch model, /clear = reset, /exit = quit.\n"
+                  "Writing: /grammar, /rephrase, /tone <style>, /email, /slack — each takes text "
+                  '(inline or a """ block).\n'
                   '""" starts/ends a multi-line message; pastes are kept together.[/dim]\n')
+    from .completer import AgentCompleter
+    # '/' shows the command menu; '@' completes a repo file path. The file list
+    # comes from `git ls-files` (list_files needs no repo-map build) and is
+    # fetched lazily on first '@' and cached by the completer.
+    set_completer(AgentCompleter(files_fn=lambda: agent.tools.repo_map.list_files()))
     while True:
         try:
             color = "blue" if agent.chat_only else "green"
@@ -150,12 +186,52 @@ def main(
             else:
                 console.print("[dim]Project notes disabled (AGENT_NOTES=0).[/dim]")
             continue
+        if text == "/model" or text.startswith("/model "):
+            switch_model(cfg, text[6:], console)
+            continue
+        if text.split(None, 1)[0] in ("/grammar", "/rephrase", "/tone", "/email", "/slack"):
+            # Split off the command word; the rest (which may begin on the next
+            # line, e.g. a """ block) is the text to transform. split(None, 1)
+            # splits on the first run of any whitespace, newlines included.
+            parts = text.split(None, 1)
+            cmd = parts[0]
+            arg = parts[1] if len(parts) > 1 else ""
+            handle_writing(cfg, cmd, arg.strip())
+            continue
         if text == "/clear":
             agent.reset()
             console.print("[dim]History cleared.[/dim]")
             continue
+        if text.startswith("/test-gen"):
+            arg = text[len("/test-gen"):].strip()
+            parts = arg.split()
+            if not parts:
+                console.print("[yellow]Usage: /test-gen <class|file> [method][/yellow]")
+            else:
+                _get_coder().test_gen(parts[0], parts[1] if len(parts) > 1 else "")
+            continue
+        if text.startswith("/doc"):
+            arg = text[len("/doc"):].strip()
+            doc_update = "--update" in arg
+            doc_target = arg.replace("--update", "").strip()
+            if not doc_target:
+                console.print("[yellow]Usage: /doc <class|file|folder> [--update][/yellow]")
+            else:
+                _get_coder().doc_gen(doc_target, update_mode=doc_update)
+            continue
+        if text.startswith("/"):
+            # Reached here with a leading slash means no command above matched,
+            # so it's a typo'd/unknown command (e.g. /grammer). Warn instead of
+            # silently sending it to the model as a chat message.
+            unknown = text.split(None, 1)[0]
+            console.print(f"[yellow]Unknown command: {unknown}[/yellow]")
+            console.print("[dim]Commands: /chat /agent /review /test-gen /doc /map /notes "
+                          "/skills /skill /model /clear /exit · writing: /grammar /rephrase "
+                          "/tone /email /slack"
+                          "\nTo send a message starting with '/', rephrase it.[/dim]")
+            continue
         try:
-            agent.ask(_augment_with_skills(text))
+            _route_or_ask(text)
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
         console.print()
@@ -264,7 +340,7 @@ def _do_init_notes(cfg: Config) -> None:
         return
 
     out = cfg.workdir / "AGENT.md"
-    out.write_text(draft + "\n")
+    out.write_text(draft + "\n", encoding="utf-8")
     console.print(f"[green]Saved {out}[/green]")
     console.print("[dim]Review and edit it — the model drafted it from your code, "
                   "so check that it's accurate.[/dim]")

@@ -1,0 +1,1604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-ui</title>
+<style>
+/* ---- tokens ---- */
+:root {
+  --bg: #ffffff;
+  --bg-surface: #f5f5f5;
+  --bg-surface2: #eaeaea;
+  --bg-input: #ffffff;
+  --border: #d4d4d4;
+  --text: #1a1a1a;
+  --text-dim: #6b6b6b;
+  --text-inv: #ffffff;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --green: #16a34a;
+  --red: #dc2626;
+  --yellow: #ca8a04;
+  --orange: #ea580c;
+  --diff-add-bg: #dcfce7;
+  --diff-del-bg: #fee2e2;
+  --diff-add-text: #166534;
+  --diff-del-text: #991b1b;
+  --code-bg: #f0f0f0;
+  --scroll-thumb: #c0c0c0;
+  --shadow: rgba(0,0,0,0.08);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f0f0f;
+    --bg-surface: #1a1a1a;
+    --bg-surface2: #262626;
+    --bg-input: #1a1a1a;
+    --border: #333333;
+    --text: #e5e5e5;
+    --text-dim: #888888;
+    --text-inv: #0f0f0f;
+    --accent: #3b82f6;
+    --accent-hover: #60a5fa;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --orange: #f97316;
+    --diff-add-bg: #052e16;
+    --diff-del-bg: #450a0a;
+    --diff-add-text: #86efac;
+    --diff-del-text: #fca5a5;
+    --code-bg: #1e1e1e;
+    --scroll-thumb: #444444;
+    --shadow: rgba(0,0,0,0.3);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f0f0f;
+  --bg-surface: #1a1a1a;
+  --bg-surface2: #262626;
+  --bg-input: #1a1a1a;
+  --border: #333333;
+  --text: #e5e5e5;
+  --text-dim: #888888;
+  --text-inv: #0f0f0f;
+  --accent: #3b82f6;
+  --accent-hover: #60a5fa;
+  --green: #22c55e;
+  --red: #ef4444;
+  --yellow: #eab308;
+  --orange: #f97316;
+  --diff-add-bg: #052e16;
+  --diff-del-bg: #450a0a;
+  --diff-add-text: #86efac;
+  --diff-del-text: #fca5a5;
+  --code-bg: #1e1e1e;
+  --scroll-thumb: #444444;
+  --shadow: rgba(0,0,0,0.3);
+}
+
+/* ---- reset & base ---- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+}
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-surface);
+  color: var(--text);
+  padding: 6px 12px;
+  transition: background 0.15s;
+}
+button:hover { background: var(--bg-surface2); }
+button.primary {
+  background: var(--accent);
+  color: var(--text-inv);
+  border-color: var(--accent);
+}
+button.primary:hover { background: var(--accent-hover); }
+button:disabled { opacity: 0.4; cursor: default; }
+input, textarea, select {
+  font: inherit;
+  color: var(--text);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  outline: none;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--scroll-thumb); border-radius: 3px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* ---- layout ---- */
+.app {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  height: 100vh;
+}
+.sidebar {
+  width: 280px;
+  min-width: 200px;
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-surface);
+  flex-shrink: 0;
+}
+.main-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* ---- top bar ---- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-surface);
+  flex-shrink: 0;
+}
+.topbar .title {
+  font-weight: 600;
+  font-size: 15px;
+  margin-right: auto;
+}
+.mode-toggle {
+  display: flex;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.mode-toggle button {
+  border: none;
+  border-radius: 0;
+  padding: 4px 14px;
+  font-size: 13px;
+  background: var(--bg-surface);
+}
+.mode-toggle button.active {
+  background: var(--accent);
+  color: var(--text-inv);
+}
+.conn-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+  margin-right: 4px;
+  transition: background 0.2s;
+}
+.conn-dot.ok { background: var(--green); }
+.conn-dot.fail { background: var(--red); }
+.conn-dot.checking {
+  background: var(--yellow);
+  animation: conn-pulse 1.2s infinite ease-in-out;
+}
+@keyframes conn-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.token-meter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.token-bar {
+  width: 60px;
+  height: 6px;
+  background: var(--bg-surface2);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.token-bar-fill {
+  height: 100%;
+  background: var(--green);
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+.token-bar-fill.warn { background: var(--yellow); }
+.token-bar-fill.danger { background: var(--red); }
+
+/* ---- sidebar ---- */
+.sidebar-header {
+  padding: 12px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 13px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.file-search {
+  width: 100%;
+  margin: 8px 12px;
+  width: calc(100% - 24px);
+  font-size: 13px;
+  padding: 5px 8px;
+}
+.file-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.file-item {
+  display: flex;
+  align-items: center;
+  padding: 3px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  gap: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.file-item:hover { background: var(--bg-surface2); }
+.file-item .path { overflow: hidden; text-overflow: ellipsis; flex: 1; }
+.file-item .dir { color: var(--text-dim); }
+.file-item .actions {
+  display: none;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.file-item:hover .actions { display: flex; }
+.file-item .actions button {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 4px;
+}
+.folder-item {
+  display: flex;
+  align-items: center;
+  padding: 3px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  gap: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+.folder-item:hover { background: var(--bg-surface2); }
+.folder-item .caret {
+  display: inline-block;
+  width: 10px;
+  flex-shrink: 0;
+  color: var(--text-dim);
+  transition: transform 0.15s;
+}
+.folder-item.open .caret { transform: rotate(90deg); }
+.folder-item .folder-name { color: var(--text-dim); overflow: hidden; text-overflow: ellipsis; }
+.tree-children { display: none; }
+.tree-children.open { display: block; }
+
+/* ---- chat files ---- */
+.chat-files {
+  border-top: 1px solid var(--border);
+  max-height: 40%;
+  overflow-y: auto;
+}
+.chat-files-header {
+  padding: 8px 12px;
+  font-weight: 600;
+  font-size: 13px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  background: var(--bg-surface);
+}
+.chat-file-item {
+  display: flex;
+  align-items: center;
+  padding: 3px 12px;
+  font-size: 13px;
+  gap: 6px;
+}
+.chat-file-item .path { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-file-item .badge {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--bg-surface2);
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.chat-file-item .badge.editable { color: var(--green); }
+.chat-file-item .remove-btn {
+  font-size: 16px;
+  line-height: 1;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  padding: 0 4px;
+  flex-shrink: 0;
+  cursor: pointer;
+}
+.chat-file-item .remove-btn:hover { color: var(--red); }
+
+/* ---- messages ---- */
+.messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.message {
+  max-width: 100%;
+  padding: 10px 14px;
+  border-radius: 10px;
+  word-break: break-word;
+  line-height: 1.55;
+}
+.message.user {
+  align-self: flex-end;
+  background: var(--accent);
+  color: var(--text-inv);
+  max-width: 80%;
+  border-bottom-right-radius: 2px;
+}
+.message.assistant {
+  align-self: flex-start;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-bottom-left-radius: 2px;
+}
+.message.assistant pre {
+  background: var(--code-bg);
+  padding: 8px 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+}
+.code-block {
+  position: relative;
+  margin: 8px 0;
+}
+.code-block .copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-surface2);
+  color: var(--text-dim);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.code-block:hover .copy-btn { opacity: 1; }
+.code-block .copy-btn:hover { color: var(--text); }
+.code-block .copy-btn.copied { color: var(--green, #3fb950); opacity: 1; }
+.message.assistant code {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 13px;
+}
+.message.assistant p code {
+  background: var(--code-bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+}
+.message.assistant p { margin: 4px 0; }
+.message.assistant ul, .message.assistant ol { padding-left: 20px; margin: 4px 0; }
+.message.assistant h1, .message.assistant h2, .message.assistant h3 {
+  margin: 8px 0 4px;
+  font-size: 15px;
+}
+.message.system {
+  align-self: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: none;
+  padding: 4px;
+}
+.message.system.success { color: var(--green); }
+.message.system pre, .message.error pre {
+  text-align: left;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  margin: 6px 0 0;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+  color: var(--text);
+}
+.message.error {
+  align-self: center;
+  color: var(--red);
+  font-size: 13px;
+  background: none;
+}
+
+/* ---- diff blocks ---- */
+.diff-block {
+  margin: 8px 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  overflow: hidden;
+  font-size: 13px;
+}
+.diff-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--bg-surface2);
+  font-weight: 500;
+  font-size: 12px;
+}
+.diff-header button {
+  font-size: 11px;
+  padding: 2px 8px;
+}
+.diff-body {
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+}
+.diff-body .line-add { background: var(--diff-add-bg); color: var(--diff-add-text); display: block; padding: 0 8px; }
+.diff-body .line-del { background: var(--diff-del-bg); color: var(--diff-del-text); display: block; padding: 0 8px; }
+.diff-body .line-ctx { display: block; padding: 0 8px; color: var(--text-dim); }
+.diff-body .line-hdr { display: block; padding: 0 8px; color: var(--accent); }
+
+/* ---- thinking ---- */
+.thinking-block {
+  margin: 4px 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--text-dim);
+  font-size: 12px;
+  color: var(--text-dim);
+  font-style: italic;
+  max-height: 80px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: max-height 0.3s;
+}
+.thinking-block.expanded { max-height: none; }
+
+/* ---- per-reply footer ---- */
+.reply-footer {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+  user-select: none;
+}
+
+/* ---- @mention autocomplete ---- */
+.input-area { position: relative; }
+.mention-menu {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  left: 16px;
+  right: 16px;
+  max-height: 220px;
+  overflow-y: auto;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 4px 16px var(--shadow);
+  z-index: 60;
+  display: none;
+}
+.mention-menu.open { display: block; }
+.mention-item {
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: "SF Mono", "Cascadia Code", "Fira Code", Consolas, monospace;
+}
+.mention-item .mention-dir { color: var(--text-dim); }
+.mention-item.active, .mention-item:hover { background: var(--bg-surface2); }
+
+/* ---- loading indicator ---- */
+.loading-dots {
+  display: inline-flex;
+  gap: 4px;
+  padding: 4px 2px;
+  align-items: center;
+}
+.loading-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  animation: loading-bounce 1.2s infinite ease-in-out both;
+}
+.loading-dots span:nth-child(2) { animation-delay: 0.16s; }
+.loading-dots span:nth-child(3) { animation-delay: 0.32s; }
+@keyframes loading-bounce {
+  0%, 80%, 100% { opacity: 0.3; transform: translateY(0); }
+  40% { opacity: 1; transform: translateY(-3px); }
+}
+
+/* ---- input area ---- */
+.input-area {
+  border-top: 1px solid var(--border);
+  padding: 12px 16px;
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  background: var(--bg);
+  flex-shrink: 0;
+}
+.input-area textarea {
+  flex: 1;
+  resize: none;
+  min-height: 40px;
+  max-height: 200px;
+  padding: 8px 12px;
+  line-height: 1.5;
+}
+.input-area .btn-group {
+  display: flex;
+  gap: 4px;
+}
+
+/* ---- settings panel ---- */
+.settings-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.4);
+  z-index: 100;
+  justify-content: center;
+  align-items: center;
+}
+.settings-overlay.open { display: flex; }
+.settings-panel {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  width: 420px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 32px var(--shadow);
+}
+.settings-panel h2 {
+  font-size: 18px;
+  margin-bottom: 16px;
+}
+.settings-panel label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  margin: 12px 0 4px;
+}
+.settings-panel input, .settings-panel select {
+  width: 100%;
+}
+.settings-panel .btn-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+  justify-content: flex-end;
+}
+.connection-status {
+  margin-top: 12px;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-surface);
+}
+.connection-status.ok { color: var(--green); }
+.connection-status.fail { color: var(--red); }
+
+/* ---- responsive ---- */
+@media (max-width: 640px) {
+  .sidebar { display: none; }
+  .sidebar.mobile-open {
+    display: flex;
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    z-index: 50;
+  }
+  .topbar .menu-btn { display: inline-flex; }
+}
+@media (min-width: 641px) {
+  .topbar .menu-btn { display: none; }
+}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- sidebar -->
+  <div class="sidebar" id="sidebar">
+    <div class="sidebar-header">
+      <span>Project Files</span>
+      <button onclick="closeSidebar()" class="menu-btn" style="font-size:18px;border:none;background:none;color:var(--text);">&times;</button>
+    </div>
+    <input type="text" class="file-search" id="fileSearch" placeholder="Search files..." oninput="filterFiles()">
+    <div class="file-tree" id="fileTree"></div>
+    <div class="chat-files" id="chatFilesSection">
+      <div class="chat-files-header">
+        <span>In Chat (<span id="chatFileCount">0</span>)</span>
+        <button onclick="dropAll()" style="font-size:11px;padding:2px 6px;">Clear all</button>
+      </div>
+      <div id="chatFiles"></div>
+    </div>
+  </div>
+
+  <!-- main -->
+  <div class="main-panel">
+    <div class="topbar">
+      <button class="menu-btn" onclick="toggleSidebar()" style="font-size:18px;border:none;background:none;color:var(--text);">&#9776;</button>
+      <span class="title">agent-ui</span>
+      <span class="conn-dot" id="connDot" title="Checking connection..."></span>
+      <div class="mode-toggle">
+        <button id="modeCode" class="active" onclick="setMode('code')">Code</button>
+        <button id="modeAsk" onclick="setMode('ask')">Ask</button>
+      </div>
+      <div class="token-meter" id="tokenMeter">
+        <div class="token-bar"><div class="token-bar-fill" id="tokenFill"></div></div>
+        <span id="tokenLabel">0%</span>
+      </div>
+      <button onclick="openSettings()" title="Settings" style="font-size:16px;padding:4px 8px;">&#9881;</button>
+      <button onclick="clearChat()" title="Clear chat" style="font-size:14px;padding:4px 8px;">Clear</button>
+    </div>
+
+    <div class="messages" id="messages"></div>
+
+    <div class="input-area">
+      <div class="mention-menu" id="mentionMenu"></div>
+      <textarea id="userInput" placeholder="Type a message... (Enter to send, Shift+Enter for newline, @ to add a file)" rows="1"></textarea>
+      <div class="btn-group">
+        <button class="primary" id="sendBtn" onclick="sendMessage()">Send</button>
+        <button id="stopBtn" onclick="stopGeneration()" style="display:none;" class="primary">Stop</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- settings overlay -->
+<div class="settings-overlay" id="settingsOverlay" onclick="if(event.target===this)closeSettings()">
+  <div class="settings-panel">
+    <h2>Settings</h2>
+    <label>Server URL</label>
+    <input type="text" id="setBaseUrl">
+    <label>API Key <span style="color:var(--text-dim);font-weight:normal">(not saved to disk)</span></label>
+    <input type="password" id="setApiKey" placeholder="Leave blank if not needed">
+    <label>Model</label>
+    <input type="text" id="setModel">
+    <label>Temperature</label>
+    <input type="number" id="setTemp" step="0.1" min="0" max="2">
+    <label>Max Tokens</label>
+    <input type="number" id="setMaxTokens" step="256" min="256">
+    <label>Context Budget (chars)</label>
+    <input type="number" id="setContextChars" step="1000" min="4000">
+    <div class="btn-row">
+      <button onclick="testConnection()">Test Connection</button>
+      <button onclick="closeSettings()">Cancel</button>
+      <button class="primary" onclick="saveSettings()">Save</button>
+    </div>
+    <div class="connection-status" id="connStatus" style="display:none;"></div>
+  </div>
+</div>
+
+<script>
+// ---- state ----
+const TOKEN = "__SESSION_TOKEN__";
+const BASE = "";
+let mode = "code";
+let streaming = false;
+let abortCtrl = null;
+
+function api(path, opts) {
+  const sep = path.includes("?") ? "&" : "?";
+  return fetch(BASE + path + sep + "token=" + TOKEN, opts);
+}
+
+// ---- auto-resize textarea ----
+const inp = document.getElementById("userInput");
+inp.addEventListener("input", () => {
+  inp.style.height = "auto";
+  inp.style.height = Math.min(inp.scrollHeight, 200) + "px";
+});
+inp.addEventListener("keydown", e => {
+  // When the @mention menu is open it owns the navigation/commit keys.
+  if (mentionOpen) {
+    if (e.key === "ArrowDown") { e.preventDefault(); moveMention(1); return; }
+    if (e.key === "ArrowUp") { e.preventDefault(); moveMention(-1); return; }
+    if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); commitMention(); return; }
+    if (e.key === "Escape") { e.preventDefault(); closeMention(); return; }
+  }
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+inp.addEventListener("input", updateMention);
+inp.addEventListener("click", updateMention);  // caret moved by mouse
+inp.addEventListener("blur", () => setTimeout(closeMention, 120));  // allow click-to-select
+
+// ---- copy buttons on code blocks (delegated, so streamed/re-rendered
+// blocks keep working without rebinding) ----
+document.getElementById("messages").addEventListener("click", async e => {
+  const btn = e.target.closest(".copy-btn");
+  if (!btn) return;
+  const code = btn.parentNode.querySelector("code");
+  if (!code) return;
+  const text = code.textContent;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    btn.textContent = "Copied";
+    btn.classList.add("copied");
+  } catch (err) {
+    btn.textContent = "Failed";
+  }
+  setTimeout(() => {
+    btn.textContent = "Copy";
+    btn.classList.remove("copied");
+  }, 1500);
+});
+
+// ---- mode ----
+function setMode(m) {
+  mode = m;
+  document.getElementById("modeCode").className = m === "code" ? "active" : "";
+  document.getElementById("modeAsk").className = m === "ask" ? "active" : "";
+}
+
+// ---- slash commands ----
+const SYNC_COMMANDS = ["lint", "test", "run", "map", "tokens", "diff"];
+const STREAM_COMMANDS = ["review"];
+const HELP_TEXT = `Available commands:
+  /lint          — run lint checks on files in chat
+  /test          — run test command (AGENT_TEST_CMD)
+  /run <cmd>     — run a shell command, show output
+  /review [target] — code review (uncommitted, staged, branch, files)
+  /map [query]   — show repo map
+  /tokens        — detailed context breakdown
+  /diff          — show last edit diffs
+  /clear         — clear chat history
+  /help          — show this help`;
+
+function parseSlashCommand(text) {
+  if (!text.startsWith("/")) return null;
+  const spaceIdx = text.indexOf(" ");
+  const cmd = spaceIdx === -1 ? text.slice(1) : text.slice(1, spaceIdx);
+  const arg = spaceIdx === -1 ? "" : text.slice(spaceIdx + 1).trim();
+  return {cmd, arg};
+}
+
+async function handleSlashCommand(cmd, arg) {
+  if (cmd === "help") {
+    addMessage("system", HELP_TEXT);
+    return;
+  }
+  if (cmd === "clear") {
+    await api("/api/clear", {method: "POST"});
+    document.getElementById("messages").innerHTML = "";
+    updateTokens();
+    return;
+  }
+  if (STREAM_COMMANDS.includes(cmd)) {
+    await handleStreamCommand(cmd, arg);
+    return;
+  }
+  if (!SYNC_COMMANDS.includes(cmd)) {
+    addMessage("error", "Unknown command: /" + cmd + ". Type /help for a list.");
+    return;
+  }
+
+  streaming = true;
+  document.getElementById("sendBtn").style.display = "none";
+  const msgEl = addMessage("system", "Running /" + cmd + "...");
+
+  try {
+    const resp = await api("/api/command", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({command: cmd, arg: arg}),
+    });
+    const data = await resp.json();
+
+    if (cmd === "lint") {
+      if (data.ok) {
+        msgEl.textContent = "Lint: passed ✓";
+        msgEl.className = "message system success";
+      } else {
+        msgEl.textContent = "Lint errors:";
+        const pre = document.createElement("pre");
+        pre.textContent = data.errors.join("\n\n");
+        msgEl.appendChild(pre);
+      }
+    } else if (cmd === "test") {
+      if (data.error) {
+        msgEl.textContent = data.error;
+      } else if (data.ok) {
+        msgEl.textContent = "Tests passed ✓";
+        msgEl.className = "message system success";
+      } else {
+        msgEl.textContent = "Tests failed:";
+        const pre = document.createElement("pre");
+        pre.textContent = data.output;
+        msgEl.appendChild(pre);
+      }
+    } else if (cmd === "run") {
+      const status = data.exit_code === 0 ? "exit 0" : "exit " + data.exit_code;
+      msgEl.textContent = "";
+      const pre = document.createElement("pre");
+      pre.textContent = data.output || "(no output)";
+      msgEl.appendChild(pre);
+      const dim = document.createElement("div");
+      dim.style.color = "var(--text-dim)";
+      dim.style.fontSize = "0.85em";
+      dim.textContent = status;
+      msgEl.appendChild(dim);
+    } else if (cmd === "map") {
+      if (data.error) {
+        msgEl.textContent = data.error;
+      } else {
+        msgEl.textContent = "";
+        const pre = document.createElement("pre");
+        pre.textContent = data.text;
+        msgEl.appendChild(pre);
+      }
+    } else if (cmd === "tokens") {
+      let lines = data.parts.map(p =>
+        "  ~" + String(p.tokens).padStart(6) + " tokens  " + p.name
+      );
+      lines.push("  ~" + String(data.total_tokens).padStart(6) + " tokens  TOTAL (budget ~" + data.budget_tokens + ")");
+      msgEl.textContent = "";
+      const pre = document.createElement("pre");
+      pre.textContent = lines.join("\n");
+      msgEl.appendChild(pre);
+    } else if (cmd === "diff") {
+      if (data.error) {
+        msgEl.textContent = data.error;
+      } else {
+        msgEl.textContent = "";
+        for (const d of data.diffs) {
+          msgEl.appendChild(renderDiff(d.file || d, typeof d === "string" ? d : d.diff || d));
+        }
+      }
+    }
+  } catch (e) {
+    addMessage("error", "Command error: " + e.message);
+  }
+
+  streaming = false;
+  document.getElementById("sendBtn").style.display = "";
+  updateTokens();
+}
+
+async function handleStreamCommand(cmd, arg) {
+  streaming = true;
+  document.getElementById("sendBtn").style.display = "none";
+  document.getElementById("stopBtn").style.display = "";
+
+  const msgEl = addMessage("assistant", "");
+  let contentBuf = "";
+
+  try {
+    const endpoint = cmd === "review" ? "/api/review" : "/api/chat";
+    const body = cmd === "review"
+      ? JSON.stringify({target: arg})
+      : JSON.stringify({message: "/" + cmd + " " + arg, mode: mode});
+
+    const resp = await api(endpoint, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: body,
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const raw = line.slice(6).trim();
+        if (!raw) continue;
+        let ev;
+        try { ev = JSON.parse(raw); } catch { continue; }
+
+        if (ev.type === "content") {
+          contentBuf += ev.text;
+          msgEl.innerHTML = renderMarkdown(contentBuf);
+          scrollToBottom();
+        } else if (ev.type === "info") {
+          addMessage("system", ev.text);
+        } else if (ev.type === "error") {
+          addMessage("error", ev.text);
+        } else if (ev.type === "done") {
+          // review complete
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") {
+      addMessage("error", "Connection error: " + e.message);
+    }
+  }
+
+  streaming = false;
+  document.getElementById("sendBtn").style.display = "";
+  document.getElementById("stopBtn").style.display = "none";
+  updateTokens();
+  refreshChatFiles();
+}
+
+// ---- send message ----
+async function sendMessage() {
+  const text = inp.value.trim();
+  if (!text || streaming) return;
+  inp.value = "";
+  inp.style.height = "auto";
+
+  // Check for slash commands
+  const slash = parseSlashCommand(text);
+  if (slash) {
+    addMessage("user", text);
+    await handleSlashCommand(slash.cmd, slash.arg);
+    return;
+  }
+
+  addMessage("user", text);
+  streaming = true;
+  document.getElementById("sendBtn").style.display = "none";
+  document.getElementById("stopBtn").style.display = "";
+
+  const msgEl = addMessage("assistant", "");
+  msgEl.innerHTML = '<div class="loading-dots"><span></span><span></span><span></span></div>';
+  let contentBuf = "";
+  let thinkBuf = "";
+  let thinkEl = null;
+  let gotFirstChunk = false;
+  const startedAt = performance.now();
+
+  try {
+    const resp = await api("/api/chat", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({message: text, mode: mode}),
+    });
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, {stream: true});
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        const raw = line.slice(6).trim();
+        if (!raw) continue;
+        let ev;
+        try { ev = JSON.parse(raw); } catch { continue; }
+
+        if (!gotFirstChunk && (ev.type === "content" || ev.type === "thinking")) {
+          gotFirstChunk = true;
+          msgEl.innerHTML = "";
+        }
+
+        if (ev.type === "content") {
+          contentBuf += ev.text;
+          msgEl.innerHTML = renderMarkdown(contentBuf);
+          scrollToBottom();
+        } else if (ev.type === "thinking") {
+          thinkBuf += ev.text;
+          if (!thinkEl) {
+            thinkEl = document.createElement("div");
+            thinkEl.className = "thinking-block";
+            thinkEl.onclick = () => thinkEl.classList.toggle("expanded");
+            msgEl.parentNode.insertBefore(thinkEl, msgEl);
+          }
+          thinkEl.textContent = "Thinking: " + thinkBuf.slice(0, 200) + (thinkBuf.length > 200 ? "..." : "");
+          thinkEl.dataset.full = thinkBuf;
+        } else if (ev.type === "done") {
+          if (ev.diffs && ev.diffs.length) {
+            for (const d of ev.diffs) {
+              msgEl.appendChild(renderDiff(d.file, d.diff));
+            }
+          }
+        } else if (ev.type === "error") {
+          addMessage("error", ev.text);
+        } else if (ev.type === "errors") {
+          for (const e of ev.errors) addMessage("error", e);
+        } else if (ev.type === "warning") {
+          addMessage("system", ev.text);
+        } else if (ev.type === "cancelled") {
+          addMessage("system", "Cancelled.");
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") {
+      addMessage("error", "Connection error: " + e.message);
+    }
+  }
+
+  if (!gotFirstChunk) {
+    const dots = msgEl.querySelector(".loading-dots");
+    if (dots) dots.remove();
+  } else if (contentBuf) {
+    addReplyFooter(msgEl, startedAt, contentBuf.length);
+  }
+  streaming = false;
+  document.getElementById("sendBtn").style.display = "";
+  document.getElementById("stopBtn").style.display = "none";
+  updateTokens();
+  refreshChatFiles();
+}
+
+// A dim line under a finished reply: how long it took and how much came back.
+// Tokens are estimated at ~4 chars each, matching the server's token meter.
+function addReplyFooter(msgEl, startedAt, chars) {
+  const secs = (performance.now() - startedAt) / 1000;
+  const took = secs < 60 ? secs.toFixed(1) + "s" : (secs / 60).toFixed(1) + "m";
+  const footer = document.createElement("div");
+  footer.className = "reply-footer";
+  footer.textContent = "done in " + took + " · ~" + Math.round(chars / 4).toLocaleString() + " tokens";
+  msgEl.appendChild(footer);
+}
+
+function stopGeneration() {
+  api("/api/cancel", {method: "POST"});
+}
+
+// ---- messages ----
+function addMessage(role, text) {
+  const el = document.createElement("div");
+  el.className = "message " + role;
+  if (role === "user") {
+    el.textContent = text;
+  } else if (role === "assistant") {
+    el.innerHTML = renderMarkdown(text);
+  } else {
+    el.textContent = text;
+  }
+  document.getElementById("messages").appendChild(el);
+  scrollToBottom();
+  return el;
+}
+
+function scrollToBottom() {
+  const c = document.getElementById("messages");
+  c.scrollTop = c.scrollHeight;
+}
+
+// ---- markdown (minimal, no lib) ----
+function renderMarkdown(text) {
+  if (!text) return "";
+  let html = escapeHtml(text);
+
+  // code blocks (wrapped with a copy button; the raw code is read back from
+  // the <code> element's textContent at copy time, so no double-escaping)
+  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
+    return '<div class="code-block">' +
+      '<button class="copy-btn" type="button">Copy</button>' +
+      '<pre><code>' + code.trimEnd() + '</code></pre>' +
+      '</div>';
+  });
+
+  // inline code
+  html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+
+  // bold + italic
+  html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  html = html.replace(/(?<!\*)\*([^*\n]+?)\*(?!\*)/g, '<em>$1</em>');
+
+  // headers
+  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+  // unordered lists
+  html = html.replace(/^[*-] (.+)$/gm, '<li>$1</li>');
+
+  // paragraphs
+  html = html.replace(/\n\n+/g, '</p><p>');
+  html = html.replace(/^/, '<p>');
+  html = html.replace(/$/, '</p>');
+
+  // clean up empty paragraphs around blocks
+  html = html.replace(/<p>\s*<(pre|h[1-3]|li|ul|ol)/g, '<$1');
+  html = html.replace(/<\/(pre|h[1-3]|li|ul|ol)>\s*<\/p>/g, '</$1>');
+  html = html.replace(/<p>\s*<\/p>/g, '');
+
+  return html;
+}
+
+function escapeHtml(t) {
+  return t.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// ---- diff rendering ----
+function renderDiff(file, diffText) {
+  const block = document.createElement("div");
+  block.className = "diff-block";
+
+  const header = document.createElement("div");
+  header.className = "diff-header";
+  header.innerHTML = '<span>' + escapeHtml(file) + '</span>';
+  const undoBtn = document.createElement("button");
+  undoBtn.textContent = "Undo";
+  undoBtn.onclick = async () => {
+    const resp = await api("/api/undo", {method: "POST"});
+    const data = await resp.json();
+    if (data.reverted) {
+      addMessage("system", "Undone: " + data.reverted.join(", "));
+      undoBtn.disabled = true;
+      undoBtn.textContent = "Undone";
+      refreshChatFiles();
+    } else {
+      addMessage("error", data.error || "Nothing to undo");
+    }
+  };
+  header.appendChild(undoBtn);
+  block.appendChild(header);
+
+  const body = document.createElement("div");
+  body.className = "diff-body";
+  const lines = diffText.split("\n");
+  for (const line of lines) {
+    const span = document.createElement("span");
+    if (line.startsWith("+")) {
+      span.className = "line-add";
+    } else if (line.startsWith("-")) {
+      span.className = "line-del";
+    } else if (line.startsWith("@@")) {
+      span.className = "line-hdr";
+    } else {
+      span.className = "line-ctx";
+    }
+    span.textContent = line;
+    body.appendChild(span);
+  }
+  block.appendChild(body);
+  return block;
+}
+
+// ---- files ----
+let allFiles = [];
+
+async function loadFiles() {
+  try {
+    const resp = await api("/api/files");
+    allFiles = await resp.json();
+    renderFileTree(allFiles);
+  } catch (e) {
+    console.error("Failed to load files:", e);
+  }
+}
+
+let fileSearchTimer = null;
+function filterFiles() {
+  clearTimeout(fileSearchTimer);
+  fileSearchTimer = setTimeout(doFilterFiles, 120);
+}
+
+function doFilterFiles() {
+  const q = document.getElementById("fileSearch").value.trim().toLowerCase();
+  if (!q) {
+    renderFileTree(allFiles);  // back to the folder tree
+    return;
+  }
+  const filtered = allFiles.filter(f => f.toLowerCase().includes(q));
+  renderFlatList(filtered);
+}
+
+// Build a nested {dirs, files} tree from flat "a/b/c.py" paths.
+function buildTree(files) {
+  const root = {dirs: {}, files: []};
+  for (const f of files) {
+    const parts = f.split("/");
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const d = parts[i];
+      if (!node.dirs[d]) node.dirs[d] = {dirs: {}, files: []};
+      node = node.dirs[d];
+    }
+    node.files.push({name: parts[parts.length - 1], path: f});
+  }
+  return root;
+}
+
+// Render one tree level into `container`. Children are only built when a
+// folder is expanded, so a large repo lays out just its top level first.
+function renderTreeLevel(node, container, prefix) {
+  const dirNames = Object.keys(node.dirs).sort();
+  for (const d of dirNames) {
+    const child = node.dirs[d];
+    const row = document.createElement("div");
+    row.className = "folder-item";
+    row.innerHTML = '<span class="caret">&#9656;</span>' +
+      '<span class="folder-name">' + escapeHtml(d) + '/</span>';
+
+    const kids = document.createElement("div");
+    kids.className = "tree-children";
+    kids.style.paddingLeft = "12px";
+
+    let built = false;
+    row.onclick = () => {
+      const open = row.classList.toggle("open");
+      kids.classList.toggle("open", open);
+      if (open && !built) {  // lazy: build children on first expand
+        renderTreeLevel(child, kids, prefix + d + "/");
+        built = true;
+      }
+    };
+    container.appendChild(row);
+    container.appendChild(kids);
+  }
+  for (const f of node.files) {
+    container.appendChild(fileRow(f.path, f.name, ""));
+  }
+}
+
+function fileRow(fullPath, label, dirHint) {
+  const item = document.createElement("div");
+  item.className = "file-item";
+  let pathHtml = "";
+  if (dirHint) pathHtml += '<span class="dir">' + escapeHtml(dirHint) + '</span>';
+  pathHtml += escapeHtml(label);
+  item.innerHTML = '<span class="path">' + pathHtml + '</span>' +
+    '<span class="actions">' +
+    '<button onclick="addFile(\'' + escapeAttr(fullPath) + '\', false)">+edit</button>' +
+    '<button onclick="addFile(\'' + escapeAttr(fullPath) + '\', true)">+read</button>' +
+    '</span>';
+  return item;
+}
+
+function renderFileTree(files) {
+  const el = document.getElementById("fileTree");
+  el.innerHTML = "";
+  renderTreeLevel(buildTree(files), el, "");
+}
+
+// Flat list used for search results (full path shown, capped).
+function renderFlatList(files) {
+  const el = document.getElementById("fileTree");
+  el.innerHTML = "";
+  const limit = 200;
+  const frag = document.createDocumentFragment();
+  for (const f of files.slice(0, limit)) {
+    const parts = f.split("/");
+    const name = parts.pop();
+    const dir = parts.length ? parts.join("/") + "/" : "";
+    frag.appendChild(fileRow(f, name, dir));
+  }
+  if (files.length > limit) {
+    const more = document.createElement("div");
+    more.className = "file-item";
+    more.style.color = "var(--text-dim)";
+    more.textContent = "... " + (files.length - limit) + " more (refine search)";
+    frag.appendChild(more);
+  }
+  el.appendChild(frag);
+}
+
+function escapeAttr(s) {
+  return s.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+}
+
+async function addFile(path, readOnly) {
+  await api("/api/add", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({files: [path], read_only: readOnly}),
+  });
+  refreshChatFiles();
+  updateTokens();
+}
+
+// ---- @mention file autocomplete ----
+// Typing `@query` before the caret pops a menu of matching project files.
+// Choosing one inserts its path into the message and adds it to the chat,
+// so you can reference and attach a file without leaving the keyboard.
+let mentionOpen = false;
+let mentionMatches = [];
+let mentionIndex = 0;
+let mentionStart = -1;  // index of the '@' in the textarea value
+
+// The @token immediately left of the caret, or null. A token runs from an '@'
+// (at start-of-text or after whitespace) up to the caret, with no whitespace.
+function mentionTokenAtCaret() {
+  const pos = inp.selectionStart;
+  if (pos !== inp.selectionEnd) return null;  // a selection, not a caret
+  const text = inp.value;
+  let i = pos - 1;
+  while (i >= 0 && !/\s/.test(text[i])) {
+    if (text[i] === "@") {
+      if (i === 0 || /\s/.test(text[i - 1])) {
+        return {start: i, query: text.slice(i + 1, pos)};
+      }
+      return null;  // '@' mid-word (e.g. an email) — not a mention
+    }
+    i--;
+  }
+  return null;
+}
+
+function updateMention() {
+  const tok = mentionTokenAtCaret();
+  if (!tok) { closeMention(); return; }
+  const q = tok.query.toLowerCase();
+  mentionMatches = (q ? allFiles.filter(f => f.toLowerCase().includes(q)) : allFiles).slice(0, 50);
+  if (!mentionMatches.length) { closeMention(); return; }
+  mentionStart = tok.start;
+  mentionIndex = 0;
+  renderMention();
+}
+
+function renderMention() {
+  const menu = document.getElementById("mentionMenu");
+  menu.innerHTML = "";
+  mentionMatches.forEach((f, i) => {
+    const parts = f.split("/");
+    const name = parts.pop();
+    const dir = parts.length ? parts.join("/") + "/" : "";
+    const item = document.createElement("div");
+    item.className = "mention-item" + (i === mentionIndex ? " active" : "");
+    item.innerHTML = (dir ? '<span class="mention-dir">' + escapeHtml(dir) + '</span>' : "") + escapeHtml(name);
+    // mousedown (not click) so it fires before the textarea's blur closes us.
+    item.addEventListener("mousedown", ev => { ev.preventDefault(); mentionIndex = i; commitMention(); });
+    menu.appendChild(item);
+  });
+  menu.classList.add("open");
+  mentionOpen = true;
+}
+
+function moveMention(delta) {
+  mentionIndex = (mentionIndex + delta + mentionMatches.length) % mentionMatches.length;
+  renderMention();
+  const active = document.querySelector(".mention-item.active");
+  if (active) active.scrollIntoView({block: "nearest"});
+}
+
+function closeMention() {
+  if (!mentionOpen) return;
+  mentionOpen = false;
+  document.getElementById("mentionMenu").classList.remove("open");
+}
+
+function commitMention() {
+  const path = mentionMatches[mentionIndex];
+  if (path == null || mentionStart < 0) { closeMention(); return; }
+  const before = inp.value.slice(0, mentionStart);
+  const after = inp.value.slice(inp.selectionStart);
+  const insert = "@" + path + " ";
+  inp.value = before + insert + after;
+  const caret = (before + insert).length;
+  inp.setSelectionRange(caret, caret);
+  inp.style.height = "auto";
+  inp.style.height = Math.min(inp.scrollHeight, 200) + "px";
+  closeMention();
+  inp.focus();
+  addFile(path, false);  // attach as editable; the badge can be toggled later
+}
+
+async function dropFile(path) {
+  await api("/api/drop", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({files: [path]}),
+  });
+  refreshChatFiles();
+  updateTokens();
+}
+
+async function dropAll() {
+  await api("/api/drop", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({files: []}),
+  });
+  refreshChatFiles();
+  updateTokens();
+}
+
+async function refreshChatFiles() {
+  try {
+    const resp = await api("/api/chat-files");
+    const files = await resp.json();
+    const el = document.getElementById("chatFiles");
+    el.innerHTML = "";
+    const entries = Object.entries(files);
+    document.getElementById("chatFileCount").textContent = entries.length;
+    for (const [f, kind] of entries) {
+      const item = document.createElement("div");
+      item.className = "chat-file-item";
+      item.innerHTML =
+        '<span class="path">' + escapeHtml(f) + '</span>' +
+        '<span class="badge ' + (kind === "editable" ? "editable" : "") + '">' + kind + '</span>' +
+        '<span class="remove-btn" onclick="dropFile(\'' + escapeAttr(f) + '\')" title="Remove">&times;</span>';
+      el.appendChild(item);
+    }
+  } catch (e) {
+    console.error("Failed to refresh chat files:", e);
+  }
+}
+
+// ---- tokens ----
+async function updateTokens() {
+  try {
+    const resp = await api("/api/tokens");
+    const d = await resp.json();
+    const fill = document.getElementById("tokenFill");
+    fill.style.width = d.pct + "%";
+    fill.className = "token-bar-fill" + (d.pct > 90 ? " danger" : d.pct > 70 ? " warn" : "");
+    document.getElementById("tokenLabel").textContent =
+      "~" + d.used_tokens.toLocaleString() + "/" + d.budget_tokens.toLocaleString() + " tokens";
+  } catch (e) {}
+}
+
+// ---- settings ----
+function openSettings() {
+  api("/api/settings").then(r => r.json()).then(s => {
+    document.getElementById("setBaseUrl").value = s.base_url;
+    document.getElementById("setModel").value = s.model;
+    document.getElementById("setTemp").value = s.temperature;
+    document.getElementById("setMaxTokens").value = s.max_tokens;
+    document.getElementById("setContextChars").value = s.context_chars;
+    document.getElementById("setApiKey").value = "";
+    document.getElementById("connStatus").style.display = "none";
+  });
+  document.getElementById("settingsOverlay").classList.add("open");
+}
+
+function closeSettings() {
+  document.getElementById("settingsOverlay").classList.remove("open");
+}
+
+async function saveSettings() {
+  const data = {
+    base_url: document.getElementById("setBaseUrl").value,
+    model: document.getElementById("setModel").value,
+    temperature: parseFloat(document.getElementById("setTemp").value),
+    max_tokens: parseInt(document.getElementById("setMaxTokens").value),
+    context_chars: parseInt(document.getElementById("setContextChars").value),
+  };
+  const key = document.getElementById("setApiKey").value;
+  if (key) data.api_key = key;
+
+  await api("/api/settings", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(data),
+  });
+  closeSettings();
+  updateTokens();
+}
+
+async function testConnection() {
+  const el = document.getElementById("connStatus");
+  el.style.display = "block";
+  el.className = "connection-status";
+  el.textContent = "Testing...";
+
+  // Apply URL/key first
+  const tempData = {
+    base_url: document.getElementById("setBaseUrl").value,
+  };
+  const key = document.getElementById("setApiKey").value;
+  if (key) tempData.api_key = key;
+  await api("/api/settings", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(tempData),
+  });
+
+  const resp = await api("/api/test-connection", {method: "POST"});
+  const d = await resp.json();
+  if (d.ok) {
+    el.className = "connection-status ok";
+    el.textContent = "Connected. Models: " + d.models.join(", ");
+  } else {
+    el.className = "connection-status fail";
+    el.textContent = "Failed: " + d.error;
+  }
+}
+
+// ---- connection status ----
+// Polls the model server so you know it's reachable before you type, rather
+// than discovering it's down when a message errors mid-send.
+async function checkConnection() {
+  const dot = document.getElementById("connDot");
+  dot.className = "conn-dot checking";
+  dot.title = "Checking connection...";
+  try {
+    const resp = await api("/api/test-connection", {method: "POST"});
+    const d = await resp.json();
+    if (d.ok) {
+      dot.className = "conn-dot ok";
+      dot.title = "Connected" + (d.models && d.models.length ? " · " + d.models.length + " model(s)" : "");
+    } else {
+      dot.className = "conn-dot fail";
+      dot.title = "Model server unreachable: " + (d.error || "unknown error");
+    }
+  } catch (e) {
+    dot.className = "conn-dot fail";
+    dot.title = "Model server unreachable: " + e.message;
+  }
+}
+
+// ---- clear ----
+async function clearChat() {
+  await api("/api/clear", {method: "POST"});
+  document.getElementById("messages").innerHTML = "";
+  updateTokens();
+}
+
+// ---- sidebar toggle (mobile) ----
+function toggleSidebar() {
+  document.getElementById("sidebar").classList.toggle("mobile-open");
+}
+function closeSidebar() {
+  document.getElementById("sidebar").classList.remove("mobile-open");
+}
+
+// ---- init ----
+loadFiles();
+refreshChatFiles();
+updateTokens();
+checkConnection();
+setInterval(checkConnection, 30000);  // re-poll so a dropped server shows up
+inp.focus();
+</script>
+</body>
+</html>

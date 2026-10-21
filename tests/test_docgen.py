@@ -863,6 +863,103 @@ class Baz {
         finally:
             server.stop()
 
+    def test_doc_gen_recovers_whole_file_fence(self):
+        """A model that returns the whole file in a ```kotlin fence instead of
+        SEARCH/REPLACE blocks is still recovered, as long as only comments
+        changed."""
+        from tests.fake_server import FakeServer
+        from agent_cli.coder import Coder
+
+        kt_file = self.root / "Qux.kt"
+        original = "class Qux {\n    fun run(): Int = 1\n}\n"
+        kt_file.write_text(original)
+
+        # No SEARCH/REPLACE markers anywhere: just the whole file, fenced.
+        model_reply = """\
+Here is the documented file:
+
+```kotlin
+/**
+ * A Qux.
+ */
+class Qux {
+    /**
+     * Runs and returns a constant.
+     */
+    fun run(): Int = 1
+}
+```
+"""
+        server = FakeServer([model_reply])
+        server.start()
+        try:
+            cfg = Config(
+                workdir=self.root,
+                base_url=server.base_url,
+                auto_approve=True,
+                stream=False,
+            )
+            coder = Coder(cfg)
+            coder.doc_gen("Qux.kt")
+
+            content = kt_file.read_text()
+            self.assertIn("/**", content)
+            self.assertIn("A Qux.", content)
+            self.assertIn("Runs and returns a constant.", content)
+            # Code is intact and the change can be undone.
+            self.assertIn("fun run(): Int = 1", content)
+            self.assertEqual(len(coder.undo_stack), 1)
+            coder.undo()
+            self.assertEqual(kt_file.read_text(), original)
+        finally:
+            server.stop()
+
+
+class ReindentKDocTest(unittest.TestCase):
+    def test_indents_block_to_match_declaration(self):
+        from agent_cli.docgen import reindent_kdoc_blocks
+
+        src = (
+            "class C {\n"
+            "/**\n"
+            "* Does a thing.\n"
+            "*/\n"
+            "        fun f() {}\n"
+            "}\n"
+        )
+        out = reindent_kdoc_blocks(src)
+        self.assertIn("        /**\n", out)
+        self.assertIn("         * Does a thing.\n", out)
+        self.assertIn("         */\n", out)
+
+    def test_leaves_correctly_indented_block_unchanged(self):
+        from agent_cli.docgen import reindent_kdoc_blocks
+
+        src = (
+            "class C {\n"
+            "    /**\n"
+            "     * Already fine.\n"
+            "     */\n"
+            "    fun f() {}\n"
+            "}\n"
+        )
+        self.assertEqual(reindent_kdoc_blocks(src), src)
+
+    def test_skips_block_above_annotation(self):
+        from agent_cli.docgen import reindent_kdoc_blocks
+
+        src = (
+            "/**\n"
+            "* A class.\n"
+            "*/\n"
+            "@Serializable\n"
+            "class C\n"
+        )
+        out = reindent_kdoc_blocks(src)
+        # Top-level: target indent is empty, annotation is skipped when
+        # locating the declaration, so the stars gain their one-space hang.
+        self.assertIn("/**\n * A class.\n */\n", out)
+
 
 if __name__ == "__main__":
     unittest.main()

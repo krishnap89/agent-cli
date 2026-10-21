@@ -11,6 +11,7 @@ treesitter = ["tree-sitter>=0.23", "tree-sitter-kotlin>=1.1", "tree-sitter-swift
 [project.scripts]
 agent = "agent_cli.main:app"
 coder = "agent_cli.coder:app"
+agent-ui = "agent_cli.web:app"
 
 [build-system]
 requires = ["setuptools>=68"]
@@ -18,3 +19,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["agent_cli"]
+
+[tool.setuptools.package-data]
+agent_cli = ["static/*.html"]

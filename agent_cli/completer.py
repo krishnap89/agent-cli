@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Iterable, List
+import re
+from typing import TYPE_CHECKING, Iterable, List, Optional
 
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.document import Document
@@ -13,7 +14,7 @@ if TYPE_CHECKING:
 ALL_COMMANDS = [
     "/add", "/ask", "/autotest", "/check", "/clear", "/code", "/compile",
     "/diff", "/doc", "/drop", "/exit", "/help", "/lint", "/ls", "/map",
-    "/mode", "/modules", "/notes", "/quit", "/read", "/reset", "/review",
+    "/mode", "/model", "/modules", "/notes", "/quit", "/read", "/reset", "/review",
     "/run", "/skill", "/skills", "/test", "/test-gen", "/tokens", "/undo",
 ]
 
@@ -126,3 +127,79 @@ def _match(candidates: List[str], prefix: str) -> Iterable[Completion]:
     for c in candidates:
         if c.lower().startswith(lower):
             yield Completion(c, start_position=-len(prefix))
+
+
+# The agent REPL (main.py) has a small, fixed set of commands. (command, hint)
+# pairs, kept in the order they're shown in the menu.
+AGENT_COMMANDS = [
+    ("/chat", "chat only, no tools"),
+    ("/agent", "use tools"),
+    ("/review", "code review [target]"),
+    ("/map", "repo map [query]"),
+    ("/notes", "show project notes"),
+    ("/skills", "list skills"),
+    ("/skill", "pin a skill [name|off]"),
+    ("/model", "switch model [name]"),
+    ("/grammar", "fix grammar & spelling"),
+    ("/rephrase", "rewrite more clearly"),
+    ("/tone", "rewrite in a tone <style> <text>"),
+    ("/email", "notes → email"),
+    ("/slack", "notes → Slack message"),
+    ("/clear", "reset history"),
+    ("/exit", "quit"),
+]
+
+
+# Characters that make up an @file token: the path plus the leading '@'.
+_AT_TOKEN_RE = re.compile(r"@[\w./\\-]*$")
+
+
+class AgentCompleter(Completer):
+    """Completes two things in the agent REPL:
+
+    - a slash command when the whole line is a bare '/cmd' (with a hint beside
+      each);
+    - a repo file path when the word under the cursor starts with '@', anywhere
+      in the message (e.g. "explain @agent_cli/main.py").
+
+    Once a slash command and a space are typed, command completion stays out of
+    the way so the argument text is free-form; '@' completion still works there.
+    """
+
+    #: read by input_reader to decide whether to pop the menu up without Tab
+    complete_while_typing = True
+
+    def __init__(self, files_fn=None):
+        # files_fn() -> list[str] of repo-relative paths. Called lazily and the
+        # result cached, so we don't shell out to git on every keystroke.
+        self._files_fn = files_fn
+        self._files = None  # type: Optional[List[str]]
+
+    def _files_list(self) -> List[str]:
+        if self._files is None:
+            try:
+                self._files = list(self._files_fn()) if self._files_fn else []
+            except Exception:
+                self._files = []
+        return self._files
+
+    def get_completions(self, document: Document, complete_event) -> Iterable[Completion]:
+        text = document.text_before_cursor
+
+        # @file completion: look at the token ending at the cursor.
+        at = _AT_TOKEN_RE.search(text)
+        if at:
+            prefix = at.group(0)[1:]  # drop the leading '@'
+            lower = prefix.lower()
+            for path in self._files_list():
+                if lower in path.lower():
+                    # Replace the '@' + partial path; keep the '@' in the result.
+                    yield Completion("@" + path, start_position=-len(at.group(0)))
+            return
+
+        # Slash-command completion: only when the whole line is a bare '/cmd'.
+        if not text.startswith("/") or " " in text or "\n" in text:
+            return
+        for cmd, hint in AGENT_COMMANDS:
+            if cmd.startswith(text):
+                yield Completion(cmd, start_position=-len(text), display_meta=hint)

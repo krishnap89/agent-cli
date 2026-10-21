@@ -54,7 +54,7 @@ def _has_android_plugin(root: Path) -> bool:
         for name in filenames:
             if name in ("build.gradle", "build.gradle.kts"):
                 try:
-                    text = Path(dirpath, name).read_text(errors="replace")
+                    text = Path(dirpath, name).read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
                 if _text_has_android_plugin(text):
@@ -62,7 +62,7 @@ def _has_android_plugin(root: Path) -> bool:
     toml = root / "gradle" / "libs.versions.toml"
     if toml.is_file():
         try:
-            text = toml.read_text(errors="replace")
+            text = toml.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return False
         if _toml_has_android_plugin(text):
@@ -77,6 +77,58 @@ def _text_has_android_plugin(text: str) -> bool:
         r"""alias\s*\(\s*libs\.plugins\.[^)]*android[^)]*\))""",
         text,
     ))
+
+
+def parse_product_flavors(text: str) -> List[str]:
+    """Return the product-flavor names declared in a build.gradle(.kts) file.
+
+    Handles both DSLs inside the `productFlavors { ... }` block:
+      - Kotlin DSL: create("dev") { }, register("dev") { }, getByName("dev") { }
+      - Groovy DSL: dev { }
+    Returns names in declaration order (first is treated as the default flavor
+    for compile tasks). Empty when the module has no flavors.
+    """
+    start = text.find("productFlavors")
+    if start == -1:
+        return []
+    brace = text.find("{", start)
+    if brace == -1:
+        return []
+    # Walk to the matching close brace of the productFlavors block.
+    depth = 0
+    i = brace
+    end = len(text)
+    while i < len(text):
+        c = text[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+        i += 1
+    block = text[brace + 1:end]
+
+    flavors = []  # type: List[str]
+    # Kotlin DSL factory calls.
+    for m in re.finditer(r"""\b(?:create|register|getByName|maybeCreate)\s*\(\s*["']([A-Za-z][\w]*)["']""", block):
+        if m.group(1) not in flavors:
+            flavors.append(m.group(1))
+    if flavors:
+        return flavors
+    # Groovy DSL: a bare `name {` at the top level of the block.
+    depth = 0
+    for line in block.splitlines():
+        stripped = line.strip()
+        if depth == 0:
+            m = re.match(r"^([A-Za-z][\w]*)\s*\{", stripped)
+            if m:
+                name = m.group(1)
+                if name not in flavors and name not in ("dimension", "flavorDimensions"):
+                    flavors.append(name)
+        depth += stripped.count("{") - stripped.count("}")
+    return flavors
 
 
 def _toml_has_android_plugin(text: str) -> bool:
@@ -108,7 +160,7 @@ def _discover_modules(root: Path) -> Dict[str, Dict]:
                 else:
                     mod_name = ":" + rel.replace("/", ":")
                 try:
-                    text = Path(dirpath, name).read_text(errors="replace")
+                    text = Path(dirpath, name).read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     text = ""
                 is_android = _text_has_android_plugin(text)
@@ -116,6 +168,7 @@ def _discover_modules(root: Path) -> Dict[str, Dict]:
                     "path": rel,
                     "android": is_android,
                     "build_file": name,
+                    "flavors": parse_product_flavors(text) if is_android else [],
                 }
     return modules
 
@@ -179,15 +232,37 @@ def compile_tasks(
         has_code = bool(exts & {".kt", ".kts", ".java"})
         has_xml_only = exts <= {".xml"}
 
+        # Product-flavored modules have no bare `compileDebugKotlin` task; the
+        # real task is flavor-qualified, e.g. `compileDevDebugKotlin`. Prefix the
+        # module's first declared flavor unless the variant already names one.
+        mod_variant = _qualify_variant(variant, mod_info.get("flavors", []))
+
         if has_code:
             if is_android:
-                tasks.append(f"{prefix}:compile{variant}Kotlin")
+                tasks.append(f"{prefix}:compile{mod_variant}Kotlin")
             else:
                 tasks.append(f"{prefix}:compileKotlin")
         elif has_xml_only and is_android:
-            tasks.append(f"{prefix}:process{variant}Resources")
+            tasks.append(f"{prefix}:process{mod_variant}Resources")
 
     return tasks, False
+
+
+def _qualify_variant(variant: str, flavors: List[str]) -> str:
+    """Prefix the first product flavor onto the build type when the module has
+    flavors and the variant does not already start with one.
+
+    e.g. variant="Debug", flavors=["dev","prod"] -> "DevDebug".
+    A variant the user already flavor-qualified (e.g. "DevDebug") is left as is.
+    """
+    if not flavors:
+        return variant
+    low = variant.lower()
+    for f in flavors:
+        if low.startswith(f.lower()):
+            return variant  # already flavor-qualified
+    flavor = flavors[0]
+    return flavor[:1].upper() + flavor[1:] + variant
 
 
 def run_gradle(
@@ -323,7 +398,7 @@ def format_kotlin_errors(
 def _get_context_lines(path: Path, lineno: int, context: int = 2) -> str:
     """Get a few lines around the error with line numbers."""
     try:
-        lines = path.read_text(errors="replace").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return ""
     start = max(lineno - context - 1, 0)

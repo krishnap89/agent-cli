@@ -153,7 +153,7 @@ def _collect_uncommitted(root: Path) -> Tuple[str, List[str], str]:
         path = root / line
         if path.is_file() and not _is_binary(path):
             try:
-                content = path.read_text(errors="replace")
+                content = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             files.append(line)
@@ -253,7 +253,7 @@ def _collect_files(root: Path, file_list: List[str]) -> Tuple[str, List[str], st
     for rel in file_list:
         path = root / rel
         try:
-            content = path.read_text(errors="replace")
+            content = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             parts.append(f"{rel}: (could not read: {e})")
             continue

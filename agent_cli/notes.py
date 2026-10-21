@@ -61,13 +61,14 @@ def load_notes(workdir: Path, env_path: str = "", max_chars: int = 3000,
     if path is None:
         return None, ""
     try:
-        text = path.read_text(errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None, ""
     if len(text) > max_chars:
+        full_len = len(text)
         text = text[:max_chars] + "\n...(truncated)..."
         if warn_once:
-            console.print(f"[yellow]Project notes file is too long ({len(path.read_text())} chars), "
+            console.print(f"[yellow]Project notes file is too long ({full_len} chars), "
                           f"truncated to {max_chars}. Consider shortening it.[/yellow]")
     return path, text
 
@@ -87,7 +88,7 @@ def gather_init_info(workdir: Path, map_text: str = "") -> str:
         for p in sorted(workdir.glob(pattern)):
             if p.is_file():
                 try:
-                    text = p.read_text(errors="replace")[:3000]
+                    text = p.read_text(encoding="utf-8", errors="replace")[:3000]
                     parts.append(f"### {p.name}\n{text}")
                 except OSError:
                     pass
@@ -101,7 +102,7 @@ def gather_init_info(workdir: Path, map_text: str = "") -> str:
         p = workdir / name
         if p.is_file():
             try:
-                text = p.read_text(errors="replace")[:2000]
+                text = p.read_text(encoding="utf-8", errors="replace")[:2000]
                 parts.append(f"### {name}\n{text}")
             except OSError:
                 pass

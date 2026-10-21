@@ -12,7 +12,7 @@ import glob
 import re
 import subprocess
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
@@ -33,9 +33,10 @@ from .review import (
     collect_material, split_material_by_file, split_material_by_commit,
     build_review_messages, build_merge_messages, needs_split, REVIEW_SYSTEM,
 )
-from .editblock import EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
+from .editblock import EditBlock, EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
 from .input_reader import read_message, set_completer
-from .llm import LLMError, chat, list_models
+from .intent import route as route_intent
+from .llm import LLMError, chat, list_models, switch_model
 from .repomap import RepoMap
 from .testgen import (
     resolve_target, detect_test_setup, classify_class, check_required_libs,
@@ -100,6 +101,58 @@ Do NOT write SEARCH/REPLACE blocks and do not claim to have changed files. If yo
 need to see a file that is not in the chat, name its path and ask the user to add it.
 """
 
+_FENCE_BLOCK_RE = re.compile(r"(?:^|\n)[ \t]*(```|~~~)[^\n]*\n(.*?)\n[ \t]*\1", re.DOTALL)
+
+
+def extract_code_block(text: str) -> Optional[str]:
+    """Return the single fenced code block's contents, or None.
+
+    Used as a fallback when the model answered a new-file request with a plain
+    ```fenced``` block instead of a SEARCH/REPLACE block. We only trust it when
+    the reply has exactly one block, so prose that quotes several snippets is
+    never mistaken for the whole file.
+    """
+    blocks = _FENCE_BLOCK_RE.findall(text)
+    if len(blocks) != 1:
+        return None
+    body = blocks[0][1].strip("\n")
+    return body or None
+
+
+# Lines that plausibly begin a Kotlin/Java source file. Used to recognise the
+# body when a model dumps a file with neither fences nor SEARCH/REPLACE.
+_SOURCE_START_RE = re.compile(
+    r"^\s*(package\b|import\b|@\w|public\b|internal\b|private\b|open\b|abstract\b|"
+    r"sealed\b|data\b|class\b|object\b|interface\b|enum\b|fun\b)")
+
+
+def extract_file_after_header(text: str, path: str) -> Optional[str]:
+    """Recover a file body a model wrote as `path <code>` with no code fence.
+
+    Some models answer a new-file request with the file path followed directly
+    by raw source (no ``` fence, no SEARCH/REPLACE). We find the path in the
+    reply and, if what follows looks like source, return it. Anchored on the
+    known path so ordinary prose is never treated as a file.
+    """
+    basename = path.rsplit("/", 1)[-1]
+    # The path/basename can appear first in a prose sentence ("...the existing
+    # Foo.kt file.") before the real header. Try every occurrence and take the
+    # first whose following text actually looks like source.
+    for needle in (path, basename):
+        start = 0
+        while True:
+            hit = text.find(needle, start)
+            if hit == -1:
+                break
+            start = hit + len(needle)
+            body = text[start:].lstrip(" :`\"'\n\t")
+            body = re.sub(r"^(```|~~~)[^\n]*\n", "", body).strip("\n")  # drop a fence if present
+            first = body.splitlines()[0] if body else ""
+            if _SOURCE_START_RE.match(first):
+                return body
+    return None
+
+
 LANGS = {".py": "python", ".js": "javascript", ".ts": "typescript", ".tsx": "tsx",
          ".jsx": "jsx", ".java": "java", ".go": "go", ".rs": "rust", ".rb": "ruby",
          ".php": "php", ".cs": "csharp", ".kt": "kotlin", ".c": "c", ".h": "c",
@@ -132,10 +185,29 @@ HELP = """Commands:
   /notes               show project notes file
   /map [query]         show the repo map
   /tokens              estimate context usage
+  /model [name]        show or switch the model (no name: list server models)
   /clear               clear chat history (keep files)
   /reset               drop all files and clear history
   /help, /exit
 Multi-line: paste directly, or wrap in \"\"\" lines."""
+
+
+def _looks_like_source_path(text: str) -> bool:
+    """True if the plan-step input looks like a file path rather than a command
+    or free-text revision instruction."""
+    text = text.strip()
+    if not text or " " in text:
+        return False
+    return text.endswith((".kt", ".java")) or "/" in text
+
+
+def _type_in_sources(type_name: str, sources: List[str]) -> bool:
+    """True if a path in sources appears to define type_name (by filename)."""
+    for src in sources:
+        stem = src.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+        if stem == type_name:
+            return True
+    return False
 
 
 class Coder:
@@ -232,7 +304,7 @@ class Coder:
 
     def _file_block(self, rel: str) -> str:
         try:
-            text = (self.root / rel).read_text(errors="replace")
+            text = (self.root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             return f"{rel}\n(could not read: {e})\n"
         fence = "```"
@@ -407,7 +479,7 @@ class Coder:
             self.undo_stack.append(changed)
             self.last_diffs = []
             for rel, old in changed.items():
-                new = (self.root / rel).read_text(errors="replace") if (self.root / rel).exists() else ""
+                new = (self.root / rel).read_text(encoding="utf-8", errors="replace") if (self.root / rel).exists() else ""
                 d = unified_diff(rel, old or "", new)
                 if d:
                     self.last_diffs.append(d)
@@ -444,7 +516,7 @@ class Coder:
                 else:
                     errors.append(f"Edit for {rel} failed: that file does not exist.")
                     continue
-            old = path.read_text(errors="replace") if path.exists() else None
+            old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
             try:
                 new = apply_edit(old or "", b.search, b.replace)
             except EditError as e:
@@ -453,7 +525,7 @@ class Coder:
                 continue
             changed.setdefault(rel, old)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(new)
+            path.write_text(new, encoding="utf-8")
             if rel not in self.editable:
                 self.editable[rel] = None
         return errors
@@ -877,12 +949,27 @@ class Coder:
             _, notes_text = load_notes(self.root, self.cfg.notes_file,
                                        self.cfg.notes_chars, warn_once=False)
 
-        # Step 4: Collect context
-        ctx = collect_context(
-            self.root, rel, class_name, method, kind, setup,
-            examples, helpers, notes_text, existing_test,
-            repo_map_files, self.cfg.context_chars,
-        )
+        # Step 4: Collect context. extra_sources holds paths the user adds at the
+        # plan step to cover types we could not resolve, so the model sees their
+        # real API instead of guessing.
+        extra_sources = []  # type: List[str]
+
+        def build_ctx() -> Tuple[str, List[str]]:
+            base, unknown = collect_context(
+                self.root, rel, class_name, method, kind, setup,
+                examples, helpers, notes_text, existing_test,
+                repo_map_files, self.cfg.context_chars,
+            )
+            for src in extra_sources:
+                try:
+                    text = (self.root / src).read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                base += f"\n\n# Added source: {src}\n```kotlin\n{text}\n```"
+            still_unknown = [t for t in unknown if not _type_in_sources(t, extra_sources)]
+            return base, still_unknown
+
+        ctx, unknown_types = build_ctx()
 
         # Step 5: Plan
         plan_prompt = build_plan_prompt(class_name, method, existing_test is not None)
@@ -897,8 +984,17 @@ class Coder:
 
         show(plan_text)
 
+        if unknown_types:
+            names = ", ".join(unknown_types)
+            console.print(
+                f"[yellow]Could not find source for: {names}.[/yellow] "
+                "The model will have to guess their API. "
+                "[dim]Add a path (e.g. app/src/.../ProductDetail.kt) at the prompt "
+                "to supply it, or accept to let the model infer.[/dim]"
+            )
+
         if self.cfg.testgen_plan and not auto_accept:
-            console.print("\n[cyan][a]ccept, [c]ancel, or type changes[/cyan]")
+            console.print(r"[cyan]\[a]ccept, \[c]ancel, add a path, or type changes[/cyan]", highlight=False)
             try:
                 choice = read_message("[dim]plan › [/dim]").strip()
             except (EOFError, KeyboardInterrupt):
@@ -906,7 +1002,21 @@ class Coder:
             if choice.lower() in ("c", "cancel"):
                 console.print("[dim]Cancelled.[/dim]")
                 return
-            if choice.lower() not in ("a", "accept", ""):
+            # A path to a source file: add it to context, drop it from unknowns,
+            # and regenerate the plan so the model plans against the real type.
+            if choice and _looks_like_source_path(choice) and (self.root / choice).is_file():
+                extra_sources.append(choice)
+                ctx, unknown_types = build_ctx()
+                console.print(f"[dim]Added {choice} to context. Regenerating plan...[/dim]")
+                plan_messages = [
+                    {"role": "system", "content": ASK_SYSTEM},
+                    {"role": "user", "content": ctx + "\n\n" + plan_prompt},
+                ]
+                plan_text = self._call_model(plan_messages)
+                if plan_text is None:
+                    return
+                show(plan_text)
+            elif choice.lower() not in ("a", "accept", ""):
                 # Revision loop
                 revision_msg = [
                     {"role": "system", "content": ASK_SYSTEM},
@@ -949,6 +1059,19 @@ class Coder:
         self._display(text)
 
         blocks, problems = parse_edit_blocks(text, default_path=t_path)
+        if not blocks and not problems:
+            # Smaller models often skip the SEARCH/REPLACE format and just emit
+            # the whole file: a single fenced block, or the path followed by raw
+            # source. Recover it. For a new file that's an empty-SEARCH create;
+            # for an existing one the SEARCH is the current contents, so
+            # apply_edit overwrites the file wholesale.
+            body = extract_code_block(text) or extract_file_after_header(text, t_path)
+            if body:
+                console.print("[dim](model skipped the edit format; treating its "
+                              "code as the full test file)[/dim]")
+                full = self.root / t_path
+                current = full.read_text(encoding="utf-8", errors="replace") if full.is_file() else ""
+                blocks = [EditBlock(t_path, current, body + "\n")]
         if blocks or problems:
             # Restrict edits to the test file only
             filtered_blocks = []
@@ -1072,7 +1195,7 @@ class Coder:
 
             # Count ignored (CODE_BUG)
             if (self.root / t_path).is_file():
-                test_text = (self.root / t_path).read_text(errors="replace")
+                test_text = (self.root / t_path).read_text(encoding="utf-8", errors="replace")
                 bug_matches = re.findall(
                     r'// SUSPECTED BUG:\s*(.+)', test_text
                 )
@@ -1087,7 +1210,7 @@ class Coder:
         self.undo_stack.append(changed)
         self.last_diffs = []
         for c_rel, old in changed.items():
-            new = (self.root / c_rel).read_text(errors="replace") if (self.root / c_rel).exists() else ""
+            new = (self.root / c_rel).read_text(encoding="utf-8", errors="replace") if (self.root / c_rel).exists() else ""
             d = unified_diff(c_rel, old or "", new)
             if d:
                 self.last_diffs.append(d)
@@ -1108,7 +1231,7 @@ class Coder:
             scan_declarations, filter_declarations, detect_kdoc_style,
             build_style_prompt, build_doc_messages, find_outdated_kdoc,
             verify_code_unchanged, verify_kdoc_balanced, resolve_doc_target,
-            format_doc_report,
+            format_doc_report, reindent_kdoc_blocks,
         )
 
         repo_map_files = {}  # type: Dict[str, Any]
@@ -1154,7 +1277,7 @@ class Coder:
         for file_idx, rel in enumerate(kt_files):
             path = self.root / rel
             try:
-                source = path.read_text(errors="replace")
+                source = path.read_text(encoding="utf-8", errors="replace")
             except OSError as e:
                 console.print(f"[yellow]Cannot read {rel}: {e}[/yellow]")
                 continue
@@ -1196,7 +1319,7 @@ class Coder:
                 batch_update = update_mode and all(d.has_kdoc for d in batch)
 
                 # Save original for guardrail
-                current_source = path.read_text(errors="replace")
+                current_source = path.read_text(encoding="utf-8", errors="replace")
                 if rel not in all_changed:
                     all_changed[rel] = source  # original before any changes
 
@@ -1206,45 +1329,70 @@ class Coder:
                 )
                 text = self._call_model(messages)
                 if text is None:
+                    console.print(f"[yellow]No reply from the model for {rel}; "
+                                   f"skipping this batch.[/yellow]")
                     continue
 
                 # Parse and apply SEARCH/REPLACE blocks
+                batch_changed = {}  # type: Dict[str, Optional[str]]
                 blocks, problems = parse_edit_blocks(text, default_path=rel)
                 if not blocks:
-                    continue
-
-                # Apply blocks
-                batch_changed = {}  # type: Dict[str, Optional[str]]
-                errors = self._apply(blocks, batch_changed)
-                if errors:
-                    for fix_round in range(self.cfg.doc_max_fix):
-                        feedback = "\n\n".join(errors)
-                        feedback += ("\n\nFix the failed SEARCH/REPLACE blocks above. Only resend "
-                                     "the blocks that failed. Copy the SEARCH lines exactly.")
-                        retry_msgs = messages + [
-                            {"role": "assistant", "content": text},
-                            {"role": "user", "content": feedback},
-                        ]
-                        text = self._call_model(retry_msgs)
-                        if text is None:
-                            break
-                        blocks, _ = parse_edit_blocks(text, default_path=rel)
-                        if not blocks:
-                            break
-                        errors = self._apply(blocks, batch_changed)
-                        if not errors:
-                            break
+                    # Smaller models often ignore the SEARCH/REPLACE format and
+                    # just return the whole file in a fenced block. Recover it as
+                    # a full-file replacement; the guardrails below still verify
+                    # that only comments changed, so this stays safe.
+                    whole = extract_code_block(text)
+                    if whole is not None and whole.strip():
+                        batch_changed[rel] = current_source
+                        path.write_text(whole if whole.endswith("\n") else whole + "\n",
+                                        encoding="utf-8")
+                    else:
+                        console.print(f"[yellow]The model did not return usable edits for {rel} "
+                                       f"(no SEARCH/REPLACE blocks and no single code block). "
+                                       f"Skipping.[/yellow]")
+                        continue
+                else:
+                    # Apply blocks
+                    errors = self._apply(blocks, batch_changed)
+                    if errors:
+                        for fix_round in range(self.cfg.doc_max_fix):
+                            feedback = "\n\n".join(errors)
+                            feedback += ("\n\nFix the failed SEARCH/REPLACE blocks above. Only resend "
+                                         "the blocks that failed. Copy the SEARCH lines exactly.")
+                            retry_msgs = messages + [
+                                {"role": "assistant", "content": text},
+                                {"role": "user", "content": feedback},
+                            ]
+                            text = self._call_model(retry_msgs)
+                            if text is None:
+                                break
+                            blocks, _ = parse_edit_blocks(text, default_path=rel)
+                            if not blocks:
+                                break
+                            errors = self._apply(blocks, batch_changed)
+                            if not errors:
+                                break
+                        if errors:
+                            console.print(f"[yellow]{len(errors)} edit block(s) for {rel} "
+                                           f"did not match the file after {self.cfg.doc_max_fix} "
+                                           f"retries.[/yellow]")
 
                 if not batch_changed:
+                    console.print(f"[yellow]Nothing applied for {rel} in this batch.[/yellow]")
                     continue
 
-                # Guardrail: verify only comments changed
-                new_source = path.read_text(errors="replace")
+                # Normalise KDoc indentation to match each declaration, then
+                # guardrail: verify only comments changed.
+                written = path.read_text(encoding="utf-8", errors="replace")
+                reindented = reindent_kdoc_blocks(written)
+                if reindented != written:
+                    path.write_text(reindented, encoding="utf-8")
+                new_source = path.read_text(encoding="utf-8", errors="replace")
                 diff_line = verify_code_unchanged(current_source, new_source)
                 if diff_line is not None:
                     console.print(f"[red]Code change detected at line {diff_line} in {rel}. "
                                    f"Reverting batch.[/red]")
-                    path.write_text(current_source)
+                    path.write_text(current_source, encoding="utf-8")
                     code_verified = False
                     continue
 
@@ -1253,7 +1401,7 @@ class Coder:
                 if unmatched is not None:
                     console.print(f"[red]Unmatched /** at line {unmatched} in {rel}. "
                                    f"Reverting batch.[/red]")
-                    path.write_text(current_source)
+                    path.write_text(current_source, encoding="utf-8")
                     code_verified = False
                     continue
 
@@ -1263,7 +1411,7 @@ class Coder:
                     total_documented += len(batch)
 
             if rel in all_changed:
-                new_content = path.read_text(errors="replace")
+                new_content = path.read_text(encoding="utf-8", errors="replace")
                 if new_content != all_changed[rel]:
                     files_changed += 1
 
@@ -1272,7 +1420,7 @@ class Coder:
             self.undo_stack.append(all_changed)
             self.last_diffs = []
             for rel, old in all_changed.items():
-                new = (self.root / rel).read_text(errors="replace") if (self.root / rel).exists() else ""
+                new = (self.root / rel).read_text(encoding="utf-8", errors="replace") if (self.root / rel).exists() else ""
                 d = unified_diff(rel, old or "", new)
                 if d:
                     self.last_diffs.append(d)
@@ -1301,7 +1449,7 @@ class Coder:
                 self.editable.pop(rel, None)
                 console.print(f"[dim]Removed new file {rel}[/dim]")
             else:
-                path.write_text(old)
+                path.write_text(old, encoding="utf-8")
                 console.print(f"[dim]Restored {rel}[/dim]")
         self.history.append({"role": "user", "content": "I undid your last edits; the files are back "
                              "to how they were before. Don't redo them unless I ask."})
@@ -1385,7 +1533,8 @@ def main(
         return
 
     if message:
-        coder.send(message)
+        if not route_intent(cfg, coder, message, console):
+            coder.send(message)
         return
 
     console.print(f"[bold]coder[/bold] · {cfg.model} @ {cfg.base_url} · {cfg.workdir}")
@@ -1591,9 +1740,11 @@ def main(
                 coder.drop([])
             elif cmd == "/check":
                 console.print(", ".join(list_models(cfg)))
+            elif cmd == "/model":
+                switch_model(cfg, arg, console)
             elif text.startswith("/"):
                 console.print(f"[yellow]Unknown command {cmd}. Type /help.[/yellow]")
-            else:
+            elif not route_intent(cfg, coder, text, console):
                 coder.send(text)
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
@@ -1636,7 +1787,7 @@ def _do_init_notes(cfg: Config) -> None:
         return
 
     out = cfg.workdir / "AGENT.md"
-    out.write_text(draft + "\n")
+    out.write_text(draft + "\n", encoding="utf-8")
     console.print(f"[green]Saved {out}[/green]")
     console.print("[dim]Review and edit it — the model drafted it from your code, "
                   "so check that it's accurate.[/dim]")
