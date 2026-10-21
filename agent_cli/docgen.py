@@ -738,6 +738,47 @@ def verify_code_unchanged(old_source: str, new_source: str) -> Optional[int]:
     return len(old_lines) + 1
 
 
+def reindent_kdoc_blocks(source: str) -> str:
+    """Re-indent each KDoc block to match the declaration line below it.
+
+    Small models often emit the KDoc body at column 0 even when the declaration
+    it documents is indented. The code-unchanged guardrail ignores whitespace so
+    this never corrupts code, but the result looks wrong. This normalises every
+    /** ... */ block (one not preceded on its first line by other code) to the
+    indentation of the next non-blank, non-annotation line.
+    """
+    lines = source.splitlines()
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        # A KDoc block whose opening line is only the /** marker (plus indent).
+        if stripped.startswith("/**") and not _ANNOTATION_RE.match(lines[i]):
+            start = i
+            end = i
+            while end < len(lines) and "*/" not in lines[end]:
+                end += 1
+            if end >= len(lines):
+                break  # unbalanced; leave it for verify_kdoc_balanced to catch
+            # Find the declaration line this KDoc precedes.
+            j = end + 1
+            while j < len(lines) and (not lines[j].strip() or _ANNOTATION_RE.match(lines[j])):
+                j += 1
+            if j < len(lines):
+                target_indent = lines[j][: len(lines[j]) - len(lines[j].lstrip())]
+                for k in range(start, end + 1):
+                    body = lines[k].lstrip()
+                    if body.startswith("/**"):
+                        lines[k] = target_indent + body
+                    elif body.startswith("*"):
+                        # Continuation/closing lines hang one space so their '*'
+                        # aligns under the second '*' of the opening '/**'.
+                        lines[k] = target_indent + " " + body
+            i = end + 1
+            continue
+        i += 1
+    return "\n".join(lines) + ("\n" if source.endswith("\n") else "")
+
+
 def verify_kdoc_balanced(source: str) -> Optional[int]:
     """Check that every /** has a matching */. Returns the line of the
     first unmatched /** or None if balanced."""
@@ -759,7 +800,24 @@ def verify_kdoc_balanced(source: str) -> Optional[int]:
 # Generation prompt
 # ---------------------------------------------------------------------------
 
-DOC_SYSTEM = """You add KDoc to Kotlin declarations. You use SEARCH/REPLACE blocks.
+DOC_SYSTEM = """You add KDoc to Kotlin declarations. You reply ONLY with SEARCH/REPLACE blocks.
+
+Each edit is written as plain text in this exact format:
+
+path/to/File.kt
+<<<<<<< SEARCH
+suspend fun trackView(product: Product) =
+=======
+/**
+ * Records that the given product was viewed.
+ */
+suspend fun trackView(product: Product) =
+>>>>>>> REPLACE
+
+- Put just enough of the declaration line in SEARCH to locate it uniquely, then
+  repeat it in REPLACE with the KDoc added directly above.
+- Copy the SEARCH lines exactly as they appear in the file, including indentation.
+- Do NOT return the whole file. Do NOT wrap your answer in ```kotlin fences.
 
 Rules:
 - Add KDoc only. Do not change, reformat or reorder any code.
@@ -811,11 +869,21 @@ def build_doc_messages(
     if notes_text:
         style_rules += "\n\nProject notes (follow these):\n" + notes_text
 
-    decl_list = "\n".join(
-        f"- line {d.decl_line}: {d.kind} {d.name}"
-        + (f" ({', '.join(d.annotations)})" if d.annotations else "")
-        for d in decls
-    )
+    src_lines = source.splitlines()
+    decl_entries = []  # type: List[str]
+    for d in decls:
+        # The exact declaration line as it appears in the file. The model must
+        # copy this verbatim into its SEARCH section (with the same leading
+        # whitespace and modifiers) so the KDoc lands above the whole
+        # declaration, not spliced into the middle of it.
+        anchor = src_lines[d.decl_line - 1] if 0 <= d.decl_line - 1 < len(src_lines) else ""
+        entry = f"- line {d.decl_line}: {d.kind} {d.name}"
+        if d.annotations:
+            entry += f" ({', '.join(d.annotations)})"
+        if anchor:
+            entry += f"\n  SEARCH line (copy exactly): {anchor}"
+        decl_entries.append(entry)
+    decl_list = "\n".join(decl_entries)
 
     file_content = f"```kotlin\n{source}\n```"
 

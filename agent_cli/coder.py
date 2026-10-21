@@ -1231,7 +1231,7 @@ class Coder:
             scan_declarations, filter_declarations, detect_kdoc_style,
             build_style_prompt, build_doc_messages, find_outdated_kdoc,
             verify_code_unchanged, verify_kdoc_balanced, resolve_doc_target,
-            format_doc_report,
+            format_doc_report, reindent_kdoc_blocks,
         )
 
         repo_map_files = {}  # type: Dict[str, Any]
@@ -1329,39 +1329,64 @@ class Coder:
                 )
                 text = self._call_model(messages)
                 if text is None:
+                    console.print(f"[yellow]No reply from the model for {rel}; "
+                                   f"skipping this batch.[/yellow]")
                     continue
 
                 # Parse and apply SEARCH/REPLACE blocks
+                batch_changed = {}  # type: Dict[str, Optional[str]]
                 blocks, problems = parse_edit_blocks(text, default_path=rel)
                 if not blocks:
-                    continue
-
-                # Apply blocks
-                batch_changed = {}  # type: Dict[str, Optional[str]]
-                errors = self._apply(blocks, batch_changed)
-                if errors:
-                    for fix_round in range(self.cfg.doc_max_fix):
-                        feedback = "\n\n".join(errors)
-                        feedback += ("\n\nFix the failed SEARCH/REPLACE blocks above. Only resend "
-                                     "the blocks that failed. Copy the SEARCH lines exactly.")
-                        retry_msgs = messages + [
-                            {"role": "assistant", "content": text},
-                            {"role": "user", "content": feedback},
-                        ]
-                        text = self._call_model(retry_msgs)
-                        if text is None:
-                            break
-                        blocks, _ = parse_edit_blocks(text, default_path=rel)
-                        if not blocks:
-                            break
-                        errors = self._apply(blocks, batch_changed)
-                        if not errors:
-                            break
+                    # Smaller models often ignore the SEARCH/REPLACE format and
+                    # just return the whole file in a fenced block. Recover it as
+                    # a full-file replacement; the guardrails below still verify
+                    # that only comments changed, so this stays safe.
+                    whole = extract_code_block(text)
+                    if whole is not None and whole.strip():
+                        batch_changed[rel] = current_source
+                        path.write_text(whole if whole.endswith("\n") else whole + "\n",
+                                        encoding="utf-8")
+                    else:
+                        console.print(f"[yellow]The model did not return usable edits for {rel} "
+                                       f"(no SEARCH/REPLACE blocks and no single code block). "
+                                       f"Skipping.[/yellow]")
+                        continue
+                else:
+                    # Apply blocks
+                    errors = self._apply(blocks, batch_changed)
+                    if errors:
+                        for fix_round in range(self.cfg.doc_max_fix):
+                            feedback = "\n\n".join(errors)
+                            feedback += ("\n\nFix the failed SEARCH/REPLACE blocks above. Only resend "
+                                         "the blocks that failed. Copy the SEARCH lines exactly.")
+                            retry_msgs = messages + [
+                                {"role": "assistant", "content": text},
+                                {"role": "user", "content": feedback},
+                            ]
+                            text = self._call_model(retry_msgs)
+                            if text is None:
+                                break
+                            blocks, _ = parse_edit_blocks(text, default_path=rel)
+                            if not blocks:
+                                break
+                            errors = self._apply(blocks, batch_changed)
+                            if not errors:
+                                break
+                        if errors:
+                            console.print(f"[yellow]{len(errors)} edit block(s) for {rel} "
+                                           f"did not match the file after {self.cfg.doc_max_fix} "
+                                           f"retries.[/yellow]")
 
                 if not batch_changed:
+                    console.print(f"[yellow]Nothing applied for {rel} in this batch.[/yellow]")
                     continue
 
-                # Guardrail: verify only comments changed
+                # Normalise KDoc indentation to match each declaration, then
+                # guardrail: verify only comments changed.
+                written = path.read_text(encoding="utf-8", errors="replace")
+                reindented = reindent_kdoc_blocks(written)
+                if reindented != written:
+                    path.write_text(reindented, encoding="utf-8")
                 new_source = path.read_text(encoding="utf-8", errors="replace")
                 diff_line = verify_code_unchanged(current_source, new_source)
                 if diff_line is not None:
