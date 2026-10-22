@@ -32,6 +32,13 @@ AGENT_KEEP_SPECIAL_TOKENS (default 1: sends vLLM `skip_special_tokens: false`, s
 Qwen's `<tool_call>` markup isn't stripped; set 0 for servers that reject it),
 AGENT_THINKING (unset = server default, 0 = Qwen3 thinking off, 1 = on),
 AGENT_EXTRA_BODY (JSON merged into every request, e.g. '{"top_p": 0.8}').
+AGENT_AUTO_MODEL (default 0: when 1, the micro-agent edit loop runs each role on
+the model mapped to its job by AGENT_MODEL_MAP instead of the single AGENT_MODEL),
+AGENT_MODEL_MAP (JSON {role: model}; roles are Locator, Planner, Editor, Fixer,
+Reviewer, Summarizer, e.g.
+'{"Editor":"code-model","Fixer":"code-model","Planner":"reason-model","Locator":"fast-model","Reviewer":"review-model"}';
+a "default" key sets the model for any unnamed role, else such roles use
+AGENT_MODEL).
 See sections below for AGENT_LINT_*, AGENT_TEST_*, AGENT_NOTES_*,
 AGENT_DOC_*, and AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
 

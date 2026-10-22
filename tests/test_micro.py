@@ -319,5 +319,125 @@ class TestBadFormatRetry(MicroTestBase):
         self.assertEqual(locator_calls, 2)
 
 
+class TestAutoModel(MicroTestBase):
+    """Per-role automatic model switching based on task complexity."""
+
+    def _models_by_role(self):
+        """Map role (system-prompt key) -> list of models used for its calls."""
+        out = {}
+        for req in self.server.requests:
+            sys_msg = req["messages"][0]["content"].lower()
+            for key in ("locate", "turn a code request", "applying one small",
+                        "fix code that failed", "review a code change", "summarise"):
+                if key in sys_msg:
+                    out.setdefault(key, []).append(req["model"])
+                    break
+        return out
+
+    def test_off_by_default_uses_single_model(self):
+        (self.root / "calc.py").write_text("x = 1\n")
+        coder = self._coder([_edit("calc.py", "x = 1", "x = 2"),
+                             "VERDICT: OK", "Set x to 2."])
+        coder.cfg.model = "solo"
+        coder.add(["calc.py"])
+
+        orch = MicroOrchestrator(coder, checker=FakeChecker([CheckResult(ok=True)]))
+        orch.run("set x to 2 in calc.py")
+
+        models = {m for req in self.server.requests for m in [req["model"]]}
+        self.assertEqual(models, {"solo"})
+
+    def test_each_role_runs_on_its_mapped_model(self):
+        (self.root / "calc.py").write_text("x = 1\n")
+        # Fast path: Editor, Reviewer, Summarizer run for a one-file request.
+        coder = self._coder([_edit("calc.py", "x = 1", "x = 2"),
+                             "VERDICT: OK", "Set x to 2."])
+        coder.cfg.auto_model = True
+        coder.cfg.model_map = ('{"Editor":"code-m","Reviewer":"review-m",'
+                               '"Summarizer":"fast-m"}')
+        coder.add(["calc.py"])
+
+        orch = MicroOrchestrator(coder, checker=FakeChecker([CheckResult(ok=True)]))
+        orch.run("set x to 2 in calc.py")
+
+        by_role = self._models_by_role()
+        self.assertEqual(by_role["applying one small"], ["code-m"])
+        self.assertEqual(by_role["review a code change"], ["review-m"])
+        self.assertEqual(by_role["summarise"], ["fast-m"])
+
+    def test_unmapped_role_falls_back_to_cfg_model(self):
+        (self.root / "calc.py").write_text("x = 1\n")
+        coder = self._coder([_edit("calc.py", "x = 1", "x = 2"),
+                             "VERDICT: OK", "Set x to 2."])
+        coder.cfg.auto_model = True
+        coder.cfg.model = "base-m"
+        coder.cfg.model_map = '{"Editor":"code-m"}'  # Reviewer/Summarizer unmapped
+        coder.add(["calc.py"])
+
+        orch = MicroOrchestrator(coder, checker=FakeChecker([CheckResult(ok=True)]))
+        orch.run("set x to 2 in calc.py")
+
+        by_role = self._models_by_role()
+        self.assertEqual(by_role["applying one small"], ["code-m"])
+        self.assertEqual(by_role["review a code change"], ["base-m"])
+
+    def test_default_key_covers_unmapped_roles(self):
+        (self.root / "calc.py").write_text("x = 1\n")
+        coder = self._coder([_edit("calc.py", "x = 1", "x = 2"),
+                             "VERDICT: OK", "Set x to 2."])
+        coder.cfg.auto_model = True
+        coder.cfg.model = "base-m"
+        coder.cfg.model_map = '{"default":"default-m","Editor":"code-m"}'
+        coder.add(["calc.py"])
+
+        orch = MicroOrchestrator(coder, checker=FakeChecker([CheckResult(ok=True)]))
+        orch.run("set x to 2 in calc.py")
+
+        by_role = self._models_by_role()
+        self.assertEqual(by_role["applying one small"], ["code-m"])
+        self.assertEqual(by_role["review a code change"], ["default-m"])
+
+    def test_banner_printed_for_every_role_even_when_repeated(self):
+        import io
+        from unittest import mock
+        from rich.console import Console
+        from agent_cli.micro import loop as loop_mod
+
+        (self.root / "calc.py").write_text("x = 1\n")
+        coder = self._coder([_edit("calc.py", "x = 1", "x = 2"),
+                             "VERDICT: OK", "Set x to 2."])
+        coder.cfg.auto_model = True
+        # Editor + Reviewer share one model; Summarizer unmapped -> cfg.model.
+        coder.cfg.model = "base-m"
+        coder.cfg.model_map = '{"Editor":"code-m","Reviewer":"code-m"}'
+        coder.add(["calc.py"])
+
+        buf = io.StringIO()
+        with mock.patch.object(loop_mod, "console", Console(file=buf, force_terminal=False, width=200)):
+            orch = MicroOrchestrator(coder, checker=FakeChecker([CheckResult(ok=True)]))
+            orch.run("set x to 2 in calc.py")
+        out = buf.getvalue()
+
+        # One banner per role that ran (fast path: Editor, Reviewer, Summarizer),
+        # including Reviewer even though it repeats the Editor's model.
+        self.assertIn("Editor \N{RIGHTWARDS ARROW} code-m", out)
+        self.assertIn("Reviewer \N{RIGHTWARDS ARROW} code-m", out)
+        self.assertIn("Summarizer \N{RIGHTWARDS ARROW} base-m", out)
+
+    def test_cfg_model_restored_after_run(self):
+        (self.root / "calc.py").write_text("x = 1\n")
+        coder = self._coder([_edit("calc.py", "x = 1", "x = 2"),
+                             "VERDICT: OK", "Set x to 2."])
+        coder.cfg.auto_model = True
+        coder.cfg.model = "base-m"
+        coder.cfg.model_map = '{"Editor":"code-m"}'
+        coder.add(["calc.py"])
+
+        orch = MicroOrchestrator(coder, checker=FakeChecker([CheckResult(ok=True)]))
+        orch.run("set x to 2 in calc.py")
+
+        self.assertEqual(coder.cfg.model, "base-m")  # override is per-call only
+
+
 if __name__ == "__main__":
     unittest.main()

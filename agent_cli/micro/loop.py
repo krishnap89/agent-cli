@@ -17,6 +17,7 @@ import json
 import os
 import re
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -24,6 +25,7 @@ from rich.console import Console
 
 from ..editblock import unified_diff
 from .checker import Checker, CheckResult
+from .modelpick import model_for
 from .roles import (
     Locator, Planner, Editor, Fixer, Reviewer, Summarizer,
     PlanStep, RoleError,
@@ -119,11 +121,36 @@ class MicroOrchestrator:
         def call(messages: List[dict]) -> Optional[str]:
             size = sum(len(m.get("content", "")) for m in messages)
             start = time.monotonic()
-            out = self._call(messages)
+            with self._role_model(role_name) as model:
+                out = self._call(messages)
             self.logger.log(role_name, "", out or "", time.monotonic() - start,
-                            extra={"input_chars": size})
+                            extra={"input_chars": size, "model": model})
             return out
         return call
+
+    @contextmanager
+    def _role_model(self, role_name: str):
+        """Point cfg.model at this role's auto-selected model for one call.
+
+        build_payload reads cfg.model at request time, so overriding it here (and
+        restoring it in finally) is all it takes to route a single role to a
+        different model. A no-op when auto_model is off: model == cfg.model.
+        """
+        model = model_for(self.cfg, role_name)
+        previous = self.cfg.model
+        if self.cfg.auto_model:
+            # Show which model this role runs on, every role, so the routing is
+            # visible even when consecutive roles share a model.
+            self._banner_model(role_name, model)
+            if model != previous:
+                self.cfg.model = model
+        try:
+            yield model
+        finally:
+            self.cfg.model = previous
+
+    def _banner_model(self, role_name: str, model: str) -> None:
+        console.print(f"[dim]  {role_name} \N{RIGHTWARDS ARROW} {model}[/dim]")
 
     @property
     def _fix_rounds(self) -> int:

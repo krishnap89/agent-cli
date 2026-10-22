@@ -24,6 +24,17 @@ class Config:
     base_url: str = os.getenv("AGENT_BASE_URL", "http://localhost:8000/v1")
     api_key: str = os.getenv("AGENT_API_KEY", "not-needed")
     model: str = os.getenv("AGENT_MODEL", "qwen")
+    # Automatic model switching in the micro-agent loop: when on, each role runs
+    # on the model mapped to its job instead of the single cfg.model. Off by
+    # default, so nothing changes unless you set the map below.
+    auto_model: bool = os.getenv("AGENT_AUTO_MODEL", "0") not in ("0", "false")
+    # JSON object mapping a role name to the model that role should run on, e.g.
+    #   AGENT_MODEL_MAP='{"Editor":"code-model","Planner":"reason-model",
+    #                     "Locator":"fast-model","Reviewer":"review-model"}'
+    # Roles: Locator, Planner, Editor, Fixer, Reviewer, Summarizer. Any role not
+    # named here (or an invalid/empty map) falls back to cfg.model. A "default"
+    # key sets the fallback for all unnamed roles.
+    model_map: str = os.getenv("AGENT_MODEL_MAP", "")
     max_tokens: int = int(os.getenv("AGENT_MAX_TOKENS", "4096"))
     temperature: float = float(os.getenv("AGENT_TEMPERATURE", "0.2"))
     timeout: int = int(os.getenv("AGENT_TIMEOUT", "300"))  # seconds per LLM request
