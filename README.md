@@ -78,8 +78,10 @@ repo map and settings:
 - /lint runs syntax checks; /test runs AGENT_TEST_CMD; /autotest on|off toggles auto-test after edits.
 - /review [target] reviews code changes (see below).
 - /notes shows the project notes file.
-- AGENT_CONTEXT_CHARS (default 48000, ~12k tokens): oldest history is dropped
-  to stay under it, and you're warned if the files alone are too big.
+- AGENT_CONTEXT_CHARS (default: no limit): set a char budget to cap context —
+  then the oldest history is dropped to stay under it, you're warned if the
+  files alone are too big, and /review splits per file past 50% of the budget.
+  Left unset or set to 0/inf/infinite/none/unlimited, nothing is trimmed.
 
 ## Automatic checks after edits
 After applying edits, coder runs built-in lint (Python syntax, JSON validity,

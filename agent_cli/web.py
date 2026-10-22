@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import typer
 
-from .config import Config
+from .config import Config, UNLIMITED_CHARS, parse_context_chars
 from .coder import Coder
 from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
 from .editblock import parse_edit_blocks, unified_diff
@@ -285,12 +285,13 @@ class WebCoder:
         msgs = self.coder.build_messages("")
         total = sum(len(m["content"]) for m in msgs)
         budget = self.cfg.context_chars
+        unlimited = budget >= UNLIMITED_CHARS
         return {
             "used_chars": total,
-            "budget_chars": budget,
+            "budget_chars": None if unlimited else budget,
             "used_tokens": total // 4,
-            "budget_tokens": budget // 4,
-            "pct": min(100, round(total * 100 / budget)) if budget else 0,
+            "budget_tokens": None if unlimited else budget // 4,
+            "pct": 0 if unlimited or not budget else min(100, round(total * 100 / budget)),
         }
 
     # ---- settings ------------------------------------------------------------
@@ -301,7 +302,7 @@ class WebCoder:
             "model": self.cfg.model,
             "temperature": self.cfg.temperature,
             "max_tokens": self.cfg.max_tokens,
-            "context_chars": self.cfg.context_chars,
+            "context_chars": 0 if self.cfg.context_chars >= UNLIMITED_CHARS else self.cfg.context_chars,
             "stream": self.cfg.stream,
         }
 
@@ -315,7 +316,7 @@ class WebCoder:
         if "max_tokens" in data:
             self.cfg.max_tokens = int(data["max_tokens"])
         if "context_chars" in data:
-            self.cfg.context_chars = int(data["context_chars"])
+            self.cfg.context_chars = parse_context_chars(str(data["context_chars"]))
         if "api_key" in data:
             self.cfg.api_key = data["api_key"]
         return self.get_settings()
@@ -379,7 +380,7 @@ class WebCoder:
         return {
             "parts": [{"name": name, "tokens": n // 4} for name, n in parts],
             "total_tokens": total // 4,
-            "budget_tokens": budget // 4,
+            "budget_tokens": None if budget >= UNLIMITED_CHARS else budget // 4,
         }
 
     def show_diff(self) -> dict:

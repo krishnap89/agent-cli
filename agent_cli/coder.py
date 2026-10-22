@@ -26,7 +26,7 @@ from .android import (
     is_build_config_file, map_file_to_module, module_display_name, run_ktlint,
 )
 from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
-from .config import Config
+from .config import Config, UNLIMITED_CHARS
 from .notes import find_notes, gather_init_info, load_notes, notes_exist, INIT_PROMPT
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display, Skill
 from .review import (
@@ -386,7 +386,7 @@ class Coder:
             self._warned_trim = True
         if history and history[0]["role"] == "assistant":
             history.pop(0)
-        if fixed > self.cfg.context_chars:
+        if fixed > self.cfg.context_chars:  # never true when unlimited
             console.print(f"[yellow]Files in the chat are about {fixed // 4} tokens, over the "
                           f"budget of ~{self.cfg.context_chars // 4}. /drop some files or use "
                           "/read for reference-only ones.[/yellow]")
@@ -411,7 +411,8 @@ class Coder:
         total = sum(n for _, n in parts)
         for name, n in parts:
             console.print(f"  ~{n // 4:>6} tokens  {name}")
-        console.print(f"  ~{total // 4:>6} tokens  TOTAL (budget ~{self.cfg.context_chars // 4})")
+        budget = "no limit" if self.cfg.context_chars >= UNLIMITED_CHARS else f"~{self.cfg.context_chars // 4}"
+        console.print(f"  ~{total // 4:>6} tokens  TOTAL (budget {budget})")
 
     # ---- talking to the model ---------------------------------------------------------
 
