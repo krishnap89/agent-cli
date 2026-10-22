@@ -144,9 +144,12 @@ class TestScoring(unittest.TestCase):
     def test_no_match(self):
         self.assertEqual(score_skill(self.skill, "deploy the server"), 0)
 
-    def test_description_words_count(self):
-        score = score_skill(self.skill, "what are the coding conventions")
-        self.assertGreater(score, 0)
+    def test_description_words_not_counted(self):
+        # "coding" appears only in the description, not in a trigger, so it
+        # must not match — the scorer uses triggers only (prevents generic
+        # words like "project"/"file" in a description from false-triggering).
+        score = score_skill(self.skill, "what are the coding guidelines")
+        self.assertEqual(score, 0)
 
     def test_case_insensitive(self):
         self.assertGreater(score_skill(self.skill, "KOTLIN STYLE"), 0)

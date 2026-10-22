@@ -10,8 +10,9 @@ Each SKILL.md has YAML-like front matter (parsed by hand, no pyyaml):
   ---
   Markdown instructions follow.
 
-Skills are scored against user messages by counting trigger/description word
-matches.  The top 1–2 (score > 0) are injected as context.
+Skills are scored against user messages by counting trigger word matches
+(the description is for humans, not matching).  The top 1–2 (score > 0) are
+injected as context.
 """
 import re
 from dataclasses import dataclass, field
@@ -130,7 +131,10 @@ def _tokenise(text: str) -> List[str]:
 def score_skill(skill: Skill, message: str) -> int:
     """Score a skill against a user message.
 
-    Counts how many trigger words and description words appear in the message.
+    Counts how many trigger words appear in the message.  Only the explicit
+    triggers are matched; the description is for humans, not matching, so a
+    skill whose description happens to share a common word with the prompt
+    (e.g. "this project", "file") no longer false-triggers.
     """
     msg_words = set(_tokenise(message))
     if not msg_words:
@@ -140,9 +144,6 @@ def score_skill(skill: Skill, message: str) -> int:
         for word in _tokenise(trigger):
             if word in msg_words:
                 score += 1
-    for word in _tokenise(skill.description):
-        if word in msg_words:
-            score += 1
     return score
 
 

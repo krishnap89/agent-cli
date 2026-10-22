@@ -1,22 +1,22 @@
 ---
 name: click-dummy
-description: Generate a clickable HTML prototype (click dummy) of a feature — one self-contained low-fi wireframe file with linked screens and fake data
+description: Generate a clickable low-fi HTML prototype (click dummy) of a feature — one self-contained wireframe file with linked screens and fake data
 triggers:
   - click dummy
   - clickdummy
   - clickable prototype
   - clickable mockup
+  - clickable wireframe
   - html prototype
   - html mockup
-  - wireframe
-  - wireframes
-  - mockup
-  - prototype
+  - html wireframe
+  - ui wireframe
+  - ui mockup
   - screen flow
-  - user flow
+  - screen mockup
+  - throwaway ui
   - proof of concept ui
   - poc ui
-  - throwaway ui
 ---
 
 ## What a click dummy is
