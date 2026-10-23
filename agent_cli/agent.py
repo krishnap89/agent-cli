@@ -8,7 +8,8 @@ from rich.markdown import Markdown
 from .config import CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION, Config, SYSTEM_PROMPT
 from .llm import LLMError, chat
 from .notes import load_notes
-from .tools import TOOL_SCHEMAS, ToolError, Tools
+from .tools import TOOL_SCHEMAS, JIRA_TOOL_SCHEMAS, ToolError, Tools
+from .jira import is_configured as is_jira_configured
 
 console = Console()
 
@@ -81,10 +82,16 @@ def _xml_value(value: str):
         return v
 
 
-def render_tool_docs() -> str:
-    """Turn the JSON schemas into prompt text the model can read."""
+def render_tool_docs(cfg=None) -> str:
+    """Turn the JSON schemas into prompt text the model can read.
+
+    The read-only Jira tools are appended only when Jira is configured, so the
+    model isn't told about tools it can't use."""
+    schemas = list(TOOL_SCHEMAS)
+    if cfg is not None and is_jira_configured(cfg):
+        schemas += JIRA_TOOL_SCHEMAS
     docs = []
-    for t in TOOL_SCHEMAS:
+    for t in schemas:
         props = t["input_schema"].get("properties", {})
         required = set(t["input_schema"].get("required", []))
         params = ", ".join(
@@ -201,7 +208,7 @@ class Agent:
         else:
             system = SYSTEM_PROMPT.format(
                 workdir=self.cfg.workdir,
-                tool_docs=render_tool_docs(),
+                tool_docs=render_tool_docs(self.cfg),
                 repo_map_section=self._repo_map_section(),
             )
             if self.cfg.notes_enabled:

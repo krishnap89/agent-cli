@@ -24,6 +24,7 @@ from .roles import (
 from .checker import Checker, CheckResult
 from .loop import MicroOrchestrator, RunLogger
 from .analysis import AnalysisOrchestrator, wants_diagram, is_analysis_request
+from .jira_plan import JiraPlanOrchestrator
 
 __all__ = [
     "Locator", "Planner", "Editor", "Fixer", "Reviewer", "Summarizer",
@@ -32,4 +33,5 @@ __all__ = [
     "Checker", "CheckResult",
     "MicroOrchestrator", "RunLogger",
     "AnalysisOrchestrator", "wants_diagram", "is_analysis_request",
+    "JiraPlanOrchestrator",
 ]

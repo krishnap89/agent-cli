@@ -170,6 +170,7 @@ HELP = """Commands:
   /mode ask|code       switch mode
   /micro <request>     run the request through the micro-agent loop
   /analyze <request>   read-only: analyse code and write a doc under docs/analysis/
+  /jira-plan <KEY>     read-only: read a Jira issue and list ordered subtasks
   /diff                show the last edits
   /undo                undo the last edits
   /run <command>       run a command; optionally share output with the model
@@ -1497,6 +1498,20 @@ class Coder:
         from .micro import AnalysisOrchestrator
         AnalysisOrchestrator(self).run(request)
 
+    def jira_plan(self, key: str) -> None:
+        """Read a Jira issue and print an ordered subtask plan (read-only).
+
+        Fetches the ticket, locates the relevant code, and runs the Planner to
+        break the work into small, ordered subtasks. Never edits source, writes
+        a document, or sends anything back to Jira. Needs Jira configured
+        (AGENT_JIRA_URL / AGENT_JIRA_EMAIL / AGENT_JIRA_TOKEN).
+        """
+        if self.mode != "code":
+            console.print("[yellow]/jira-plan only runs in code mode.[/yellow]")
+            return
+        from .micro import JiraPlanOrchestrator
+        JiraPlanOrchestrator(self).run(key)
+
     def run(self, command: str) -> None:
         failed = True
         try:
@@ -1639,6 +1654,8 @@ def main(
                 coder.micro(arg) if arg else console.print("[yellow]Usage: /micro <request>[/yellow]")
             elif cmd == "/analyze":
                 coder.analyze(arg) if arg else console.print("[yellow]Usage: /analyze <request>[/yellow]")
+            elif cmd in ("/jira-plan", "/jira_plan"):
+                coder.jira_plan(arg) if arg else console.print("[yellow]Usage: /jira-plan <ISSUE-KEY>[/yellow]")
             elif cmd == "/undo":
                 coder.undo()
             elif cmd == "/diff":

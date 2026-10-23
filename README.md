@@ -40,7 +40,8 @@ Reviewer, Summarizer, e.g.
 a "default" key sets the model for any unnamed role, else such roles use
 AGENT_MODEL).
 See sections below for AGENT_LINT_*, AGENT_TEST_*, AGENT_NOTES_*,
-AGENT_DOC_*, and AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
+AGENT_DOC_*, AGENT_JIRA_* (read-only Jira), and
+AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
 
 ## How tool calling works without server support
 
@@ -205,6 +206,40 @@ go in `~/.gradle/gradle.properties`:
 Recommendation: keep `--offline` in `AGENT_GRADLE_ARGS` once all dependencies
 are cached by a normal Android Studio build. If `gradlew` isn't executable,
 run `chmod +x gradlew`.
+
+## Jira (read-only)
+Give the agent read access to Jira Cloud issues so you can say "implement
+PROJ-123" and it pulls the ticket, or ask it to look over open bugs. Set three
+env vars (the token is an API token from id.atlassian.com → Security → API
+tokens, not your password):
+
+    AGENT_JIRA_URL=https://you.atlassian.net
+    AGENT_JIRA_EMAIL=you@company.com
+    AGENT_JIRA_TOKEN=<api-token>
+    AGENT_JIRA_TIMEOUT=30     # seconds per Jira request (default 30)
+
+With all three set, two tools appear:
+
+- `jira_issue(key)` — read one issue (summary, status, assignee, description,
+  comments), e.g. `jira_issue(key="PROJ-123")`.
+- `jira_search(jql, max_results=20)` — run a JQL query, e.g.
+  `jira_search(jql='project = PROJ AND status = "In Progress"')`.
+
+Both are read-only: the agent never creates, comments on, or transitions
+issues. If any of the three vars is unset the tools are hidden from the model.
+
+### `/jira-plan <ISSUE-KEY>` — ticket → subtasks
+A read-only pipeline (in `coder`, code mode) that turns one ticket into an
+ordered plan:
+
+    /jira-plan PROJ-123
+
+It fetches the issue, locates the code it concerns (the same keyword-search +
+Locator step the `/micro` analysis pipeline uses), then runs the Planner to
+break the work into small, ordered subtasks, each naming the files it would
+touch. It prints the plan and stops — no source is edited, no document is
+written, and nothing is sent back to Jira. Implement a step afterwards with
+`/micro`.
 
 ## Project notes
 Create an AGENT.md (or CONVENTIONS.md, .agent/notes.md) in your project root

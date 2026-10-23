@@ -75,6 +75,13 @@ class Config:
     notes_file: str = os.getenv("AGENT_NOTES_FILE", "")
     notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))
     skill_chars: int = int(os.getenv("AGENT_SKILL_CHARS", "3000"))
+    # Jira Cloud (read-only). When all three are set, the jira_issue and
+    # jira_search tools are offered to the model; otherwise they stay hidden.
+    # The token is an API token from id.atlassian.com -> Security -> API tokens.
+    jira_url: str = os.getenv("AGENT_JIRA_URL", "")      # e.g. https://you.atlassian.net
+    jira_email: str = os.getenv("AGENT_JIRA_EMAIL", "")  # the account the token belongs to
+    jira_token: str = os.getenv("AGENT_JIRA_TOKEN", "")
+    jira_timeout: int = int(os.getenv("AGENT_JIRA_TIMEOUT", "30"))  # seconds per Jira request
     debug: bool = os.getenv("AGENT_DEBUG", "") not in ("", "0", "false")
     # vLLM: keep special tokens such as <tool_call> in the output. Qwen's tool-call
     # markup is made of special tokens, which vLLM strips by default, so the

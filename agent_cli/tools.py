@@ -168,6 +168,37 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# Jira tools are read-only and only offered when Jira is configured (see
+# Tools.schemas and Config.jira_*). Kept separate so render_tool_docs can skip
+# them when there are no credentials.
+JIRA_TOOL_SCHEMAS = [
+    {
+        "name": "jira_issue",
+        "description": "Read one Jira issue by key (e.g. PROJ-123): summary, status, "
+                       "assignee, description and comments. Use it to pull the ticket "
+                       "before implementing or explaining work.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"key": {"type": "string"}},
+            "required": ["key"],
+        },
+    },
+    {
+        "name": "jira_search",
+        "description": "Search Jira issues with a JQL query, e.g. "
+                       "'project = PROJ AND status = \"In Progress\"'. Returns a compact "
+                       "list of key, status, type, summary and assignee.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "jql": {"type": "string"},
+                "max_results": {"type": "integer", "default": 20},
+            },
+            "required": ["jql"],
+        },
+    },
+]
+
 MAX_OUTPUT = 8_000  # chars returned to the model per tool call
 SEARCH_MAX_LINES = 40  # matching lines returned by search
 SEARCH_PER_FILE = 5    # matching lines per file
@@ -499,3 +530,25 @@ class Tools:
         except subprocess.TimeoutExpired:
             return "Command timed out after 120s."
         return f"exit code: {r.returncode}\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+
+    # ---- Jira (read-only) ---------------------------------------------------
+
+    def t_jira_issue(self, key: str) -> str:
+        from . import jira
+        if not jira.is_configured(self.cfg):
+            return ("Jira is not configured. Set AGENT_JIRA_URL, AGENT_JIRA_EMAIL "
+                    "and AGENT_JIRA_TOKEN.")
+        try:
+            return jira.get_issue(self.cfg, key)
+        except jira.JiraError as e:
+            return f"Jira error: {e}"
+
+    def t_jira_search(self, jql: str, max_results: int = 20) -> str:
+        from . import jira
+        if not jira.is_configured(self.cfg):
+            return ("Jira is not configured. Set AGENT_JIRA_URL, AGENT_JIRA_EMAIL "
+                    "and AGENT_JIRA_TOKEN.")
+        try:
+            return jira.search_issues(self.cfg, jql, max_results)
+        except jira.JiraError as e:
+            return f"Jira error: {e}"
