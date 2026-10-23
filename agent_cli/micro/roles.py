@@ -87,15 +87,19 @@ class Locator(Role):
 
     name = "Locator"
     system = (
-        "You locate the files that must be edited to satisfy a code request.\n"
-        "You are given the request and a map of the repository.\n"
-        "Reply with ONLY a list of repo-relative file paths, one per line, no prose,\n"
-        "no numbering, no code fences. List only files that must be opened or changed,\n"
-        "most important first, at most 6. If you cannot tell, list your single best guess."
+        "You locate the files that must be opened to satisfy a code request.\n"
+        "You are given the request, a map of the repository, and (sometimes) a\n"
+        "list of files whose contents already match the request's keywords --\n"
+        "prefer those, they were found by searching the code. Reply with ONLY a\n"
+        "list of repo-relative file paths, one per line, no prose, no numbering,\n"
+        "no code fences. List only files that must be opened or changed, most\n"
+        "important first, at most 6. If you cannot tell, list your single best guess."
     )
 
-    def build(self, *, request: str, repo_map: str) -> str:
-        return f"Request:\n{request}\n\nRepository map:\n{repo_map}\n\nList the files to edit:"
+    def build(self, *, request: str, repo_map: str, hits: str = "") -> str:
+        hits_section = f"\n\nFiles whose contents match the request (from a keyword search):\n{hits}" if hits else ""
+        return (f"Request:\n{request}\n\nRepository map:\n{repo_map}{hits_section}\n\n"
+                "List the files to open:")
 
     def parse(self, text: str) -> List[str]:
         files = []
@@ -275,6 +279,189 @@ class Reviewer(Role):
         if verdict is None:
             raise RoleError("no 'VERDICT: OK' or 'VERDICT: CHANGES' line found")
         return verdict, notes
+
+
+# ---- Keyworder (read-only analysis pipeline) -----------------------------------------
+
+class Keyworder(Role):
+    """Expand a request into code-search keywords (synonyms, likely identifiers).
+
+    The deterministic extractor can only grep words the user literally typed, so
+    "authentication" never finds a `login`/`session`/`credential` file. This role
+    proposes the vocabulary the code is likely to use. It guesses blind (it does
+    not see the repo); grep then validates the guesses against the real files, so
+    an invented term simply matches nothing. Advisory: its terms are UNIONED with
+    the deterministic ones, never a replacement.
+    """
+
+    name = "Keyworder"
+    system = (
+        "You turn a request about a codebase into search keywords.\n"
+        "Given the request, list the words and short identifiers most likely to\n"
+        "appear IN THE CODE for that subject -- the concept itself plus common\n"
+        "synonyms and naming conventions. For 'authentication' that might be:\n"
+        "auth, login, signin, session, credential, token, oauth.\n"
+        "Reply with ONLY the keywords, comma-separated, lowercase, no prose, at\n"
+        "most 10. Prefer short stems that match many identifiers (auth, not\n"
+        "authentication). No file paths, no explanations."
+    )
+
+    def build(self, *, request: str) -> str:
+        return f"Request:\n{request}\n\nSearch keywords:"
+
+    def parse(self, text: str) -> List[str]:
+        # Accept commas or newlines; strip bullets/quotes; keep word-ish tokens.
+        raw = re.split(r"[,\n]", text)
+        terms: List[str] = []
+        for tok in raw:
+            t = tok.strip().strip("`\"'-*0123456789. \t").lower()
+            if t and re.fullmatch(r"[a-z][a-z0-9_]{1,}", t) and t not in terms:
+                terms.append(t)
+        if not terms:
+            raise RoleError("no keywords found; reply with comma-separated words")
+        return terms[:10]
+
+
+# ---- Relevance gate (read-only analysis pipeline) ------------------------------------
+
+_RELEVANT_RE = re.compile(r"^\s*RELEVANT\s*:\s*(YES|NO)\b", re.I)
+
+
+class RelevanceGate(Role):
+    """Judge whether the located files are actually about what the request asked.
+
+    The Locator always returns its best guess, even when nothing in the repo
+    matches -- fine for editing (the user named the change) but bad for analysis,
+    where confidently documenting the wrong files is worse than admitting the
+    code was not found. This gate sees only the request and the file list (paths
+    and a one-line outline), not the full source, so it stays cheap.
+    """
+
+    name = "RelevanceGate"
+    system = (
+        "You decide whether a set of files is relevant to an analysis request.\n"
+        "You are given the request and a list of candidate files (paths and a\n"
+        "short outline of each). Reply EXACTLY one or two lines:\n"
+        "RELEVANT: YES   (at least one file is about the subject of the request)\n"
+        "or\n"
+        "RELEVANT: NO\n"
+        "REASON: <one short sentence on what the request asked for vs. what the files are>\n"
+        "Judge by subject only. If the request names a topic (e.g. authentication)\n"
+        "and none of the files concern it, answer NO. No other text."
+    )
+
+    def build(self, *, request: str, file_outline: str) -> str:
+        return (f"Request:\n{request}\n\nCandidate files:\n{file_outline}\n\n"
+                "Are these files relevant to the request?")
+
+    def parse(self, text: str) -> Tuple[bool, str]:
+        relevant = None
+        reason = ""
+        for line in text.splitlines():
+            m = _RELEVANT_RE.match(line)
+            if m:
+                relevant = m.group(1).upper() == "YES"
+            m = re.match(r"^\s*REASON\s*:\s*(.*)$", line, re.I)
+            if m:
+                reason = m.group(1).strip()
+        if relevant is None:
+            raise RoleError("no 'RELEVANT: YES' or 'RELEVANT: NO' line found")
+        return relevant, reason
+
+
+# ---- Analyst / Diagrammer / Writer (read-only analysis pipeline) ---------------------
+
+class Analyst(Role):
+    """Read the located files and describe their structure, without changing them.
+
+    This role never edits code. It produces a plain-text analysis of the classes,
+    their attributes, and how they relate -- the raw material the Writer turns
+    into a document (and the Diagrammer, when asked, into a diagram).
+    """
+
+    name = "Analyst"
+    system = (
+        "You analyse source code and explain its structure. You NEVER modify code\n"
+        "and you NEVER output SEARCH/REPLACE blocks or file edits.\n"
+        "You are given a request and the full contents of the relevant files.\n"
+        "Describe only what the code actually contains: the classes/types, their\n"
+        "key attributes, and the relationships between them (inheritance, usage,\n"
+        "composition). Be concrete and name real identifiers. Plain prose and short\n"
+        "bullet lists only."
+    )
+
+    def build(self, *, request: str, file_blocks: str) -> str:
+        return (f"Request:\n{request}\n\nFiles to analyse (read-only):\n\n{file_blocks}\n\n"
+                "Write the analysis:")
+
+    def parse(self, text: str) -> str:
+        analysis = text.strip()
+        if not analysis:
+            raise RoleError("empty analysis")
+        return analysis
+
+
+class Diagrammer(Role):
+    """Turn the Analyst's findings into a Mermaid classDiagram. Output only the diagram."""
+
+    name = "Diagrammer"
+    system = (
+        "You turn a code analysis into a single Mermaid class diagram.\n"
+        "Reply with ONE fenced Mermaid block and nothing else:\n"
+        "```mermaid\n"
+        "classDiagram\n"
+        "  ...\n"
+        "```\n"
+        "Use classDiagram syntax: `ClassName` nodes, attributes/methods inside a\n"
+        "class block, and relationship arrows (<|-- inheritance, --> association,\n"
+        "*-- composition, o-- aggregation). Only include classes and relationships\n"
+        "named in the analysis. No prose before or after the block."
+    )
+
+    def build(self, *, request: str, analysis: str) -> str:
+        return (f"Request:\n{request}\n\nAnalysis to diagram:\n\n{analysis}\n\n"
+                "Write the Mermaid class diagram:")
+
+    def parse(self, text: str) -> str:
+        m = re.search(r"```mermaid\s*\n(.*?)```", text, re.DOTALL | re.IGNORECASE)
+        body = m.group(1).strip() if m else text.strip()
+        if not body:
+            raise RoleError("no mermaid diagram found")
+        if "classDiagram" not in body and "graph" not in body:
+            raise RoleError("diagram is not a Mermaid classDiagram/graph")
+        return body
+
+
+class Writer(Role):
+    """Assemble the final analysis document (prose + optional diagram) as Markdown.
+
+    The Writer produces document text only -- the orchestrator writes it to the
+    output file. It never emits SEARCH/REPLACE blocks or touches source files.
+    """
+
+    name = "Writer"
+    system = (
+        "You write a clear Markdown document from an analysis of some code.\n"
+        "You are given the request, the analysis, and (optionally) a Mermaid\n"
+        "diagram to embed. Produce a well-structured Markdown document: a title,\n"
+        "the diagram in a ```mermaid block if one was given, then the explanation.\n"
+        "Describe only what the analysis contains. Output the Markdown document\n"
+        "and nothing else -- no SEARCH/REPLACE blocks, no commentary about files."
+    )
+
+    def build(self, *, request: str, analysis: str, diagram: Optional[str] = None) -> str:
+        diagram_note = ""
+        if diagram:
+            diagram_note = (f"\nEmbed this diagram verbatim inside a ```mermaid code block:\n\n"
+                            f"{diagram}\n")
+        return (f"Request:\n{request}\n\nAnalysis:\n\n{analysis}\n{diagram_note}\n"
+                "Write the Markdown document:")
+
+    def parse(self, text: str) -> str:
+        doc = text.strip()
+        if not doc:
+            raise RoleError("empty document")
+        return doc
 
 
 # ---- Summarizer ----------------------------------------------------------------------

@@ -18,14 +18,18 @@ records one undo snapshot for the whole run.
 """
 from .roles import (
     Locator, Planner, Editor, Fixer, Reviewer, Summarizer,
+    Keyworder, RelevanceGate, Analyst, Diagrammer, Writer,
     Role, RoleError, PlanStep,
 )
 from .checker import Checker, CheckResult
 from .loop import MicroOrchestrator, RunLogger
+from .analysis import AnalysisOrchestrator, wants_diagram, is_analysis_request
 
 __all__ = [
     "Locator", "Planner", "Editor", "Fixer", "Reviewer", "Summarizer",
+    "Keyworder", "RelevanceGate", "Analyst", "Diagrammer", "Writer",
     "Role", "RoleError", "PlanStep",
     "Checker", "CheckResult",
     "MicroOrchestrator", "RunLogger",
+    "AnalysisOrchestrator", "wants_diagram", "is_analysis_request",
 ]

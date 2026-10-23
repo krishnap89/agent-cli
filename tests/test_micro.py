@@ -13,6 +13,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_cli.config import Config
 from agent_cli.coder import Coder
@@ -437,6 +438,245 @@ class TestAutoModel(MicroTestBase):
         orch.run("set x to 2 in calc.py")
 
         self.assertEqual(coder.cfg.model, "base-m")  # override is per-call only
+
+
+class TestAnalysisPipeline(MicroTestBase):
+    """The read-only Locator -> Analyst -> (Diagrammer) -> Writer pipeline."""
+
+    def setUp(self):
+        super().setUp()
+        # Most tests here script the role sequence exactly, so keep the optional
+        # LLM Keyworder call out of it by default; the Keyworder tests opt in.
+        patcher = mock.patch.dict(os.environ, {"AGENT_ANALYSIS_LLM_KEYWORDS": "0"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run(self, request, script):
+        from agent_cli.micro import AnalysisOrchestrator
+        coder = self._coder(script)
+        AnalysisOrchestrator(coder).run(request)
+        return coder
+
+    def test_prose_request_writes_doc_without_diagram(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "calc.py").write_text("class Calc:\n    pass\n")
+        coder = self._coder([
+            "calc.py",                      # Locator
+            "RELEVANT: YES",                # RelevanceGate
+            "Calc is a class with no attributes.",  # Analyst
+            "# Calc\n\nCalc is a class.",   # Writer (no Diagrammer: not a diagram request)
+        ])
+        AnalysisOrchestrator(coder).run("explain the Calc class")
+
+        out = self.root / "docs" / "analysis" / "explain-the-calc-class.md"
+        self.assertTrue(out.is_file())
+        self.assertIn("# Calc", out.read_text())
+        # Locator, RelevanceGate, Analyst, Writer ran (no Diagrammer).
+        self.assertEqual(len(self.server.requests), 4)
+
+    def test_diagram_request_runs_diagrammer_and_embeds_it(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "calc.py").write_text("class Calc:\n    pass\n")
+        coder = self._coder([
+            "calc.py",                                  # Locator
+            "RELEVANT: YES",                            # RelevanceGate
+            "Calc relates to nothing.",                 # Analyst
+            "```mermaid\nclassDiagram\n  class Calc\n```",  # Diagrammer
+            "# Calc\n\n```mermaid\nclassDiagram\n  class Calc\n```\n\nText.",  # Writer
+        ])
+        AnalysisOrchestrator(coder).run("show the class diagram")
+
+        self.assertEqual(len(self.server.requests), 5)  # Diagrammer ran
+        out = self.root / "docs" / "analysis" / "show-the-class-diagram.md"
+        self.assertIn("classDiagram", out.read_text())
+
+    def test_no_source_file_is_edited(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        src = self.root / "calc.py"
+        src.write_text("class Calc:\n    pass\n")
+        before = src.read_text()
+        coder = self._coder([
+            "calc.py",
+            "RELEVANT: YES",
+            "Calc is a class.",
+            "# Calc\n\nText.",
+        ])
+        AnalysisOrchestrator(coder).run("describe calc.py")
+
+        self.assertEqual(src.read_text(), before)   # source untouched
+        self.assertNotIn("calc.py", coder.editable)  # not added as editable
+
+    def test_undo_removes_the_generated_doc(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "calc.py").write_text("class Calc:\n    pass\n")
+        coder = self._coder(["calc.py", "RELEVANT: YES", "Calc is a class.", "# Calc\n\nText."])
+        AnalysisOrchestrator(coder).run("describe calc.py")
+        out = self.root / "docs" / "analysis" / "describe-calc-py.md"
+        self.assertTrue(out.is_file())
+
+        coder.undo()
+        self.assertFalse(out.exists())  # old was None -> undo deletes it
+
+    def test_irrelevant_files_stop_the_run_before_the_analyst(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        # The Locator returns unrelated files; the gate says NO, so no doc is
+        # written and the Analyst never runs.
+        (self.root / "color.py").write_text("WHITE = 1\n")
+        coder = self._coder([
+            "color.py",                                    # Locator
+            "RELEVANT: NO\nREASON: these are color constants, not auth.",  # RelevanceGate
+        ])
+        wrote = AnalysisOrchestrator(coder).run("show the authentication")
+
+        self.assertFalse(wrote)
+        self.assertEqual(len(self.server.requests), 2)  # Locator + gate only
+        self.assertFalse((self.root / "docs" / "analysis").exists())
+
+    def test_gate_can_be_disabled(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "color.py").write_text("WHITE = 1\n")
+        # No gate reply scripted: with the gate off it must not be called.
+        coder = self._coder(["color.py", "Some analysis.", "# Doc\n\nText."])
+        with mock.patch.dict(os.environ, {"AGENT_ANALYSIS_GATE": "0"}):
+            wrote = AnalysisOrchestrator(coder).run("show the authentication")
+        self.assertTrue(wrote)
+        self.assertEqual(len(self.server.requests), 3)  # Locator, Analyst, Writer
+
+    def test_unparseable_gate_verdict_proceeds(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "calc.py").write_text("class Calc:\n    pass\n")
+        # Gate replies garbage twice (role retries once); the run proceeds anyway.
+        coder = self._coder([
+            "calc.py", "huh?", "still no verdict",
+            "Calc is a class.", "# Calc\n\nText.",
+        ])
+        wrote = AnalysisOrchestrator(coder).run("describe calc.py")
+        self.assertTrue(wrote)
+
+    def test_locator_path_that_does_not_exist_is_dropped(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        coder = self._coder(["nope/missing.py"])  # Locator names a file that isn't there
+        wrote = AnalysisOrchestrator(coder).run("explain missing.py")
+        self.assertFalse(wrote)
+        # Only the Locator ran; with no real files the pipeline stops before the Analyst.
+        self.assertEqual(len(self.server.requests), 1)
+
+    def test_keywords_drop_verbs_and_stopwords(self):
+        from agent_cli.micro.analysis import request_keywords
+        kw = request_keywords("show the class diagram of the authentication")
+        self.assertIn("authentication", kw)
+        self.assertIn("auth", kw)          # stem added for the long word
+        self.assertNotIn("show", kw)       # analysis verb dropped
+        self.assertNotIn("the", kw)        # stopword dropped
+        self.assertNotIn("diagram", kw)
+
+    def test_presearch_surfaces_files_the_map_would_miss(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        # A file that mentions the subject but would be a poor repo-map hit.
+        (self.root / "SupabaseAuthDataSource.kt").write_text(
+            "class SupabaseAuthDataSource { fun login() {} }\n")
+        (self.root / "Color.kt").write_text("val WHITE = 1\n")
+        coder = self._coder(["ignored"])  # no real model call: we test _presearch directly
+        orch = AnalysisOrchestrator(coder)
+        hits = orch._presearch("show the authentication class diagram")
+        self.assertIn("SupabaseAuthDataSource.kt", hits)
+        self.assertNotIn("Color.kt", hits)
+
+    def test_presearch_hits_are_passed_to_the_locator(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "SupabaseAuthDataSource.kt").write_text(
+            "class SupabaseAuthDataSource { fun login() {} }\n")
+        coder = self._coder([
+            "SupabaseAuthDataSource.kt",   # Locator (picks the pre-search hit)
+            "RELEVANT: YES",
+            "It authenticates via Supabase.",
+            "# Auth\n\nText.",
+        ])
+        AnalysisOrchestrator(coder).run("explain the authentication")
+        # The Locator's user message carries the keyword-search section.
+        locator_msg = self.server.requests[0]["messages"][1]["content"]
+        self.assertIn("keyword search", locator_msg.lower())
+        self.assertIn("SupabaseAuthDataSource.kt", locator_msg)
+
+    def test_llm_keywords_union_with_deterministic_terms(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "calc.py").write_text("x = 1\n")
+        coder = self._coder(["auth, login, session, authentication"])  # Keyworder reply
+        orch = AnalysisOrchestrator(coder)
+        with mock.patch.dict(os.environ, {"AGENT_ANALYSIS_LLM_KEYWORDS": "1"}):
+            terms = orch._search_terms("explain the authentication")
+        # Deterministic terms (authentication, auth) are kept; LLM adds login/session.
+        self.assertIn("authentication", terms)
+        self.assertIn("auth", terms)
+        self.assertIn("login", terms)
+        self.assertIn("session", terms)
+        # No duplicates despite overlap between the two sources.
+        self.assertEqual(len(terms), len(set(terms)))
+
+    def test_llm_keyword_failure_falls_back_to_deterministic(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "calc.py").write_text("x = 1\n")
+        # Keyworder replies garbage twice (role retries once) -> RoleError -> fallback.
+        coder = self._coder(["???", "still nothing"])
+        orch = AnalysisOrchestrator(coder)
+        with mock.patch.dict(os.environ, {"AGENT_ANALYSIS_LLM_KEYWORDS": "1"}):
+            terms = orch._search_terms("explain the authentication")
+        self.assertEqual(terms, ["authentication", "auth"])  # deterministic only
+
+    def test_llm_keywords_skipped_when_disabled(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "calc.py").write_text("x = 1\n")
+        coder = self._coder([])  # no replies: Keyworder must not be called
+        orch = AnalysisOrchestrator(coder)
+        with mock.patch.dict(os.environ, {"AGENT_ANALYSIS_LLM_KEYWORDS": "0"}):
+            terms = orch._search_terms("explain the authentication")
+        self.assertEqual(terms, ["authentication", "auth"])
+        self.assertEqual(len(self.server.requests), 0)  # no LLM call made
+
+    def test_presearch_excludes_own_analysis_output(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        # A real source file and a prior analysis doc, both mentioning "auth".
+        (self.root / "AuthManager.kt").write_text("class AuthManager { fun login() {} }\n")
+        prior = self.root / "docs" / "analysis" / "class-diagram-of-the.md"
+        prior.parent.mkdir(parents=True, exist_ok=True)
+        prior.write_text("# Auth\n\nThis is about authentication and login tokens.\n")
+        coder = self._coder(["ignored"])
+        hits = AnalysisOrchestrator(coder)._presearch("the authentication class")
+        self.assertIn("AuthManager.kt", hits)
+        self.assertNotIn("docs/analysis/class-diagram-of-the.md", hits)  # own output filtered
+
+    def test_locator_naming_an_output_doc_has_it_dropped(self):
+        from agent_cli.micro import AnalysisOrchestrator
+        (self.root / "AuthManager.kt").write_text("class AuthManager { fun login() {} }\n")
+        prior = self.root / "docs" / "analysis" / "old.md"
+        prior.parent.mkdir(parents=True, exist_ok=True)
+        prior.write_text("# old auth doc\n")
+        # Locator names BOTH the stale doc and the real source; the doc is dropped.
+        coder = self._coder([
+            "docs/analysis/old.md\nAuthManager.kt",
+            "RELEVANT: YES",
+            "AuthManager authenticates.",
+            "# Auth\n\nText.",
+        ])
+        AnalysisOrchestrator(coder).run("the authentication class")
+        # The gate saw only the real source, not the stale doc.
+        gate_msg = self.server.requests[1]["messages"][1]["content"]
+        self.assertIn("AuthManager.kt", gate_msg)
+        self.assertNotIn("docs/analysis/old.md", gate_msg)
+
+    def test_keyworder_parse_accepts_commas_and_strips_junk(self):
+        from agent_cli.micro import Keyworder
+        kw = Keyworder(lambda m: None)
+        self.assertEqual(kw.parse("auth, login, Session\n- token"),
+                         ["auth", "login", "session", "token"])
+
+    def test_routing_sends_read_requests_to_analysis(self):
+        from agent_cli.micro import is_analysis_request
+        self.assertTrue(is_analysis_request("show the class diagram"))
+        self.assertTrue(is_analysis_request("explain how auth works"))
+        self.assertTrue(is_analysis_request("document the ProductFilter model"))
+        self.assertFalse(is_analysis_request("add a --version flag"))
+        self.assertFalse(is_analysis_request("rename foo to bar"))
 
 
 if __name__ == "__main__":

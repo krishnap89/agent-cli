@@ -122,7 +122,9 @@ def main(
     if skills:
         console.print(f"[dim]Skills: {len(skills)} loaded[/dim]")
     console.print(f"[dim]Mode: {agent.mode_name}. "
-                  "/chat = chat only, /agent = use tools, /review [target] = code review, "
+                  "/chat = chat only, /agent = use tools, /micro <request> = micro-agent edit loop, "
+                  "/analyze <request> = read-only code analysis doc, "
+                  "/review [target] = code review, "
                   "/test-gen <class> = generate tests, /doc <target> = generate docs, "
                   "/map [query] = repo map, /notes = show notes, /skills = list skills, "
                   "/model [name] = switch model, /clear = reset, /exit = quit.\n"
@@ -202,6 +204,24 @@ def main(
             agent.reset()
             console.print("[dim]History cleared.[/dim]")
             continue
+        if text.startswith("/micro"):
+            arg = text[len("/micro"):].strip()
+            if not arg:
+                console.print("[yellow]Usage: /micro <request>[/yellow]")
+            elif chat_only:
+                console.print("[yellow]/micro needs tools; switch to agent mode (/agent) first.[/yellow]")
+            else:
+                _get_coder().micro(_prepare(arg))
+            continue
+        if text.startswith("/analyze"):
+            arg = text[len("/analyze"):].strip()
+            if not arg:
+                console.print("[yellow]Usage: /analyze <request>[/yellow]")
+            elif chat_only:
+                console.print("[yellow]/analyze needs tools; switch to agent mode (/agent) first.[/yellow]")
+            else:
+                _get_coder().analyze(_prepare(arg))
+            continue
         if text.startswith("/test-gen"):
             arg = text[len("/test-gen"):].strip()
             parts = arg.split()
@@ -225,7 +245,7 @@ def main(
             # silently sending it to the model as a chat message.
             unknown = text.split(None, 1)[0]
             console.print(f"[yellow]Unknown command: {unknown}[/yellow]")
-            console.print("[dim]Commands: /chat /agent /review /test-gen /doc /map /notes "
+            console.print("[dim]Commands: /chat /agent /micro /analyze /review /test-gen /doc /map /notes "
                           "/skills /skill /model /clear /exit · writing: /grammar /rephrase "
                           "/tone /email /slack"
                           "\nTo send a message starting with '/', rephrase it.[/dim]")

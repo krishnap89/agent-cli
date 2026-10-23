@@ -169,6 +169,7 @@ HELP = """Commands:
   /code <request>      one request with edits (or /mode code)
   /mode ask|code       switch mode
   /micro <request>     run the request through the micro-agent loop
+  /analyze <request>   read-only: analyse code and write a doc under docs/analysis/
   /diff                show the last edits
   /undo                undo the last edits
   /run <command>       run a command; optionally share output with the model
@@ -1465,12 +1466,36 @@ class Coder:
             console.print(Syntax(d, "diff", theme="ansi_dark"))
 
     def micro(self, request: str) -> None:
-        """Run a request through the micro-agent loop (Locator/Planner/Editor/...)."""
+        """Run a request through the micro-agent loop.
+
+        A read/explain/diagram request ("show the class diagram", "explain how X
+        works") is routed to the read-only analysis pipeline, which reads the
+        relevant files and writes a document without touching any source. Every
+        other request goes to the edit loop (Locator/Planner/Editor/...).
+        """
         if self.mode != "code":
             console.print("[yellow]/micro only runs in code mode.[/yellow]")
             return
-        from .micro import MicroOrchestrator
-        MicroOrchestrator(self).run(request)
+        from .micro import MicroOrchestrator, AnalysisOrchestrator, is_analysis_request
+        if is_analysis_request(request):
+            console.print("[dim]Read-only analysis request: running the analysis "
+                          "pipeline (no source files will be edited).[/dim]")
+            AnalysisOrchestrator(self).run(request)
+        else:
+            MicroOrchestrator(self).run(request)
+
+    def analyze(self, request: str) -> None:
+        """Run the read-only analysis pipeline directly (Locator/Analyst/Writer).
+
+        Reads the relevant files and writes a Markdown document under
+        docs/analysis/; never edits source. Use this to force analysis even when
+        the request does not look like a read request.
+        """
+        if self.mode != "code":
+            console.print("[yellow]/analyze only runs in code mode.[/yellow]")
+            return
+        from .micro import AnalysisOrchestrator
+        AnalysisOrchestrator(self).run(request)
 
     def run(self, command: str) -> None:
         failed = True
@@ -1612,6 +1637,8 @@ def main(
                 coder.send(arg, mode="code") if arg else setattr(coder, "mode", "code")
             elif cmd == "/micro":
                 coder.micro(arg) if arg else console.print("[yellow]Usage: /micro <request>[/yellow]")
+            elif cmd == "/analyze":
+                coder.analyze(arg) if arg else console.print("[yellow]Usage: /analyze <request>[/yellow]")
             elif cmd == "/undo":
                 coder.undo()
             elif cmd == "/diff":

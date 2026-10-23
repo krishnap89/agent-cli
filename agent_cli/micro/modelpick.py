@@ -10,7 +10,8 @@ at a reasoning model, Locator at a small fast model, and Reviewer at a review
 model. Any role the map does not name falls back to the map's "default" key, or
 to `cfg.model` when that is absent too.
 
-The roles are: Locator, Planner, Editor, Fixer, Reviewer, Summarizer.
+The roles are: Locator, Planner, Editor, Fixer, Reviewer, Summarizer (edit
+pipeline) and Analyst, Diagrammer, Writer (read-only analysis pipeline).
 """
 import json
 from typing import TYPE_CHECKING, Dict
@@ -18,8 +19,11 @@ from typing import TYPE_CHECKING, Dict
 if TYPE_CHECKING:
     from ..config import Config
 
-# All micro-agent roles, so callers (and docs) have the canonical set.
-ROLES = ("Locator", "Planner", "Editor", "Fixer", "Reviewer", "Summarizer")
+# All micro-agent roles, so callers (and docs) have the canonical set. The edit
+# pipeline uses Locator/Planner/Editor/Fixer/Reviewer/Summarizer; the read-only
+# analysis pipeline uses Locator/Analyst/Diagrammer/Writer.
+ROLES = ("Locator", "Planner", "Editor", "Fixer", "Reviewer", "Summarizer",
+         "Keyworder", "RelevanceGate", "Analyst", "Diagrammer", "Writer")
 
 # Fallback key: a model under this name in the map applies to every role the map
 # does not name explicitly.
