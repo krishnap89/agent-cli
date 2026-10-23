@@ -83,6 +83,10 @@ class Config:
     jira_token: str = os.getenv("AGENT_JIRA_TOKEN", "")
     jira_timeout: int = int(os.getenv("AGENT_JIRA_TIMEOUT", "30"))  # seconds per Jira request
     debug: bool = os.getenv("AGENT_DEBUG", "") not in ("", "0", "false")
+    # Append every outgoing HTTP request and incoming reply to this file.
+    # Quieter than AGENT_DEBUG (which prints to the console); the Authorization
+    # bearer token is redacted. Empty = off.
+    http_log: str = os.getenv("AGENT_HTTP_LOG", "")
     # vLLM: keep special tokens such as <tool_call> in the output. Qwen's tool-call
     # markup is made of special tokens, which vLLM strips by default, so the
     # model's tool call silently vanishes. Set to 0 for servers that reject it.

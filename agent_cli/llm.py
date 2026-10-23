@@ -12,11 +12,36 @@ import re
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from typing import Callable, List, Optional
 
 from .config import Config
 
 RETRY_STATUS = {429, 502, 503, 504}
+
+
+def log_http(cfg: Config, direction: str, text: str) -> None:
+    """Append one HTTP request or reply to cfg.http_log, if set.
+
+    direction is a short tag like 'REQUEST' or 'REPLY'. The Authorization
+    header's bearer token is redacted so the log is safe to share. Logging
+    never raises: a bad path is silently skipped rather than killing a reply.
+    """
+    if not cfg.http_log:
+        return
+    text = re.sub(r"(Bearer )\S+", r"\1<redacted>", text)
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        with open(cfg.http_log, "a", encoding="utf-8") as f:
+            f.write(f"\n===== {stamp}  {direction} =====\n{text}\n")
+    except OSError:
+        pass
+
+
+def _log_request(cfg: Config, req: "urllib.request.Request") -> None:
+    headers = "\n".join(f"{k}: {v}" for k, v in req.header_items())
+    body = req.data.decode("utf-8", errors="replace") if req.data else ""
+    log_http(cfg, "REQUEST", f"{req.get_method()} {req.full_url}\n{headers}\n\n{body}")
 
 # on_progress(phase, chars) is called while streaming; phase is "thinking" or "writing"
 ProgressFn = Optional[Callable[[str, int], None]]
@@ -118,6 +143,7 @@ def _chat_once(cfg: Config, messages: list, stop, on_progress: ProgressFn,
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers=_headers(cfg), method="POST"
     )
+    _log_request(cfg, req)
     try:
         # With streaming, the timeout applies to each gap between chunks,
         # not to the whole reply.
@@ -166,6 +192,7 @@ def iter_stream_events(cfg: Config, resp):
             continue
         if cfg.debug:
             print("[stream]", data[:300])
+        log_http(cfg, "REPLY chunk", data)
         if "error" in chunk:
             raise LLMError(f"Server error during streaming: {json.dumps(chunk['error'])[:300]}")
         for choice in chunk.get("choices", []):
@@ -216,6 +243,7 @@ def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
 
 
 def _parse_full(cfg: Config, data: dict) -> Reply:
+    log_http(cfg, "REPLY", json.dumps(data, indent=2))
     if cfg.debug:
         print("\n----- RAW RESPONSE -----\n" + json.dumps(data, indent=2)[:4000] + "\n------------------------\n")
     try:
@@ -244,6 +272,7 @@ def open_stream(cfg: Config, messages: list, temperature: Optional[float] = None
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers=_headers(cfg), method="POST"
     )
+    _log_request(cfg, req)
     return urllib.request.urlopen(req, timeout=cfg.timeout)
 
 
