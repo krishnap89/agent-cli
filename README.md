@@ -32,8 +32,16 @@ AGENT_KEEP_SPECIAL_TOKENS (default 1: sends vLLM `skip_special_tokens: false`, s
 Qwen's `<tool_call>` markup isn't stripped; set 0 for servers that reject it),
 AGENT_THINKING (unset = server default, 0 = Qwen3 thinking off, 1 = on),
 AGENT_EXTRA_BODY (JSON merged into every request, e.g. '{"top_p": 0.8}').
+AGENT_AUTO_MODEL (default 0: when 1, the micro-agent edit loop runs each role on
+the model mapped to its job by AGENT_MODEL_MAP instead of the single AGENT_MODEL),
+AGENT_MODEL_MAP (JSON {role: model}; roles are Locator, Planner, Editor, Fixer,
+Reviewer, Summarizer, e.g.
+'{"Editor":"code-model","Fixer":"code-model","Planner":"reason-model","Locator":"fast-model","Reviewer":"review-model"}';
+a "default" key sets the model for any unnamed role, else such roles use
+AGENT_MODEL).
 See sections below for AGENT_LINT_*, AGENT_TEST_*, AGENT_NOTES_*,
-AGENT_DOC_*, and AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
+AGENT_DOC_*, AGENT_JIRA_* (read-only Jira), and
+AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
 
 ## How tool calling works without server support
 
@@ -73,12 +81,15 @@ repo map and settings:
   closest real lines so the model can fix them (AGENT_MAX_REFLECTIONS, default 2).
 - If the model names a repo file that isn't in the chat, coder offers to add
   it and re-send your request.
+- /micro <request> runs the request through the micro-agent loop (see below).
 - /undo, /diff, /run <cmd> (optionally share output), /tokens, /map, /clear, /reset.
 - /lint runs syntax checks; /test runs AGENT_TEST_CMD; /autotest on|off toggles auto-test after edits.
 - /review [target] reviews code changes (see below).
 - /notes shows the project notes file.
-- AGENT_CONTEXT_CHARS (default 48000, ~12k tokens): oldest history is dropped
-  to stay under it, and you're warned if the files alone are too big.
+- AGENT_CONTEXT_CHARS (default: no limit): set a char budget to cap context —
+  then the oldest history is dropped to stay under it, you're warned if the
+  files alone are too big, and /review splits per file past 50% of the budget.
+  Left unset or set to 0/inf/infinite/none/unlimited, nothing is trimmed.
 
 ## Automatic checks after edits
 After applying edits, coder runs built-in lint (Python syntax, JSON validity,
@@ -99,6 +110,46 @@ rounds, default 2).
 Per-extension lint commands (`AGENT_LINT_CMD_<EXT>`, e.g. `AGENT_LINT_CMD_KT`)
 run on the changed files of that extension only. Lookup order per file:
 `AGENT_LINT_CMD_<EXT>`, then `AGENT_LINT_CMD`, then built-in check.
+
+## Micro-agent loop (`/micro`)
+`/micro <request>` (and `coder --micro "<request>"`) runs an edit request
+through a small pipeline of focused roles instead of one long chat. Each role
+sees only its own inputs — there is no shared history to drift — and produces a
+strict format that is parsed in Python; a bad-format reply is retried once, then
+the run stops with a clear message.
+
+    Locator -> Planner -> for each step:
+        Editor -> Checker -> (Fixer -> Checker)* -> Reviewer
+    -> Summarizer
+
+- **Locator** picks the files to edit from the repo map (it may name a new file
+  to create, as long as the path is sane — a known source extension inside an
+  existing directory; wild paths are ignored). **Planner** breaks the request
+  into small ordered steps, and each step's files are validated against the
+  Locator's set: a step referencing a path that was never located has it
+  dropped (and the plan is re-requested once if nothing valid is left), so steps
+  can't send the Editor after an invented file.
+- For each step, **Editor** writes SEARCH/REPLACE blocks, **Checker** (no LLM:
+  built-in lint + the Gradle compile check already used after normal edits)
+  verifies them, and **Fixer** repairs failures for up to `AGENT_FIX_ROUNDS`
+  rounds. The step stops early if the *same* check error comes back twice.
+  Edits are scoped to the step's files: a block aimed at any other path (an
+  invented path, or the format example) is rejected and sent back, never written.
+- **Reviewer** judges each step's diff against its intent. A CHANGES verdict
+  feeds its note back to the Fixer (so "compiles but doesn't match the step" is
+  caught too), up to `AGENT_REVIEW_ROUNDS` extra passes; the edits are kept
+  either way. **Summarizer** writes the final one-paragraph summary from the
+  actual diff.
+- **Fast path:** if the request names exactly one file already in the chat, the
+  Locator and Planner are skipped and the request runs as a single step.
+- The active role and round are shown in the terminal. Every role call is logged
+  to `.agent-cache/runs/<timestamp>.jsonl` (input size, output, duration).
+- The whole run is one undo snapshot: a single `/undo` reverts everything.
+
+```
+AGENT_FIX_ROUNDS=2      # Fixer rounds per step for a failed check (default: AGENT_MAX_FIX_ATTEMPTS)
+AGENT_REVIEW_ROUNDS=1   # extra Fixer passes driven by a Reviewer CHANGES verdict (0 disables)
+```
 
 ## Kotlin / Android support
 For Kotlin Android projects built with Gradle, coder detects modules
@@ -155,6 +206,40 @@ go in `~/.gradle/gradle.properties`:
 Recommendation: keep `--offline` in `AGENT_GRADLE_ARGS` once all dependencies
 are cached by a normal Android Studio build. If `gradlew` isn't executable,
 run `chmod +x gradlew`.
+
+## Jira (read-only)
+Give the agent read access to Jira Cloud issues so you can say "implement
+PROJ-123" and it pulls the ticket, or ask it to look over open bugs. Set three
+env vars (the token is an API token from id.atlassian.com → Security → API
+tokens, not your password):
+
+    AGENT_JIRA_URL=https://you.atlassian.net
+    AGENT_JIRA_EMAIL=you@company.com
+    AGENT_JIRA_TOKEN=<api-token>
+    AGENT_JIRA_TIMEOUT=30     # seconds per Jira request (default 30)
+
+With all three set, two tools appear:
+
+- `jira_issue(key)` — read one issue (summary, status, assignee, description,
+  comments), e.g. `jira_issue(key="PROJ-123")`.
+- `jira_search(jql, max_results=20)` — run a JQL query, e.g.
+  `jira_search(jql='project = PROJ AND status = "In Progress"')`.
+
+Both are read-only: the agent never creates, comments on, or transitions
+issues. If any of the three vars is unset the tools are hidden from the model.
+
+### `/jira-plan <ISSUE-KEY>` — ticket → subtasks
+A read-only pipeline (in `coder`, code mode) that turns one ticket into an
+ordered plan:
+
+    /jira-plan PROJ-123
+
+It fetches the issue, locates the code it concerns (the same keyword-search +
+Locator step the `/micro` analysis pipeline uses), then runs the Planner to
+break the work into small, ordered subtasks, each naming the files it would
+touch. It prints the plan and stops — no source is edited, no document is
+written, and nothing is sent back to Jira. Implement a step afterwards with
+`/micro`.
 
 ## Project notes
 Create an AGENT.md (or CONVENTIONS.md, .agent/notes.md) in your project root

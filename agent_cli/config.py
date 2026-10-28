@@ -3,11 +3,38 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+# Sentinel for an unbounded context budget. A large int (not float("inf")) so
+# that the existing integer arithmetic on context_chars keeps working: `// 4`
+# and `// 2` stay ints, comparisons never trim, and it still serializes as
+# plain JSON instead of the invalid `Infinity` literal.
+UNLIMITED_CHARS = 1 << 62
+
+
+def parse_context_chars(value: str) -> int:
+    """Parse AGENT_CONTEXT_CHARS. Empty, 0, or inf/infinite/none/unlimited
+    (any case) mean no limit; anything else is an int char budget."""
+    v = value.strip().lower()
+    if v in ("", "0", "inf", "infinite", "infinity", "none", "unlimited", "-1"):
+        return UNLIMITED_CHARS
+    return int(v)
+
+
 @dataclass
 class Config:
     base_url: str = os.getenv("AGENT_BASE_URL", "http://localhost:8000/v1")
     api_key: str = os.getenv("AGENT_API_KEY", "not-needed")
     model: str = os.getenv("AGENT_MODEL", "qwen")
+    # Automatic model switching in the micro-agent loop: when on, each role runs
+    # on the model mapped to its job instead of the single cfg.model. Off by
+    # default, so nothing changes unless you set the map below.
+    auto_model: bool = os.getenv("AGENT_AUTO_MODEL", "0") not in ("0", "false")
+    # JSON object mapping a role name to the model that role should run on, e.g.
+    #   AGENT_MODEL_MAP='{"Editor":"code-model","Planner":"reason-model",
+    #                     "Locator":"fast-model","Reviewer":"review-model"}'
+    # Roles: Locator, Planner, Editor, Fixer, Reviewer, Summarizer. Any role not
+    # named here (or an invalid/empty map) falls back to cfg.model. A "default"
+    # key sets the fallback for all unnamed roles.
+    model_map: str = os.getenv("AGENT_MODEL_MAP", "")
     max_tokens: int = int(os.getenv("AGENT_MAX_TOKENS", "4096"))
     temperature: float = float(os.getenv("AGENT_TEMPERATURE", "0.2"))
     timeout: int = int(os.getenv("AGENT_TIMEOUT", "300"))  # seconds per LLM request
@@ -15,7 +42,7 @@ class Config:
     retries: int = int(os.getenv("AGENT_RETRIES", "3"))  # on 429/502/503/504
     use_map: bool = os.getenv("AGENT_MAP", "1") not in ("0", "false")
     map_chars: int = int(os.getenv("AGENT_MAP_CHARS", "4000"))  # repo map size in the prompt
-    context_chars: int = int(os.getenv("AGENT_CONTEXT_CHARS", "48000"))  # ~12k tokens, coder
+    context_chars: int = parse_context_chars(os.getenv("AGENT_CONTEXT_CHARS", ""))  # default no limit; set chars to cap
     max_reflections: int = int(os.getenv("AGENT_MAX_REFLECTIONS", "2"))  # coder: retries for failed edits
     max_fix_attempts: int = int(os.getenv("AGENT_MAX_FIX_ATTEMPTS", "2"))
     max_turns: int = int(os.getenv("AGENT_MAX_TURNS", "30"))
@@ -48,7 +75,18 @@ class Config:
     notes_file: str = os.getenv("AGENT_NOTES_FILE", "")
     notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))
     skill_chars: int = int(os.getenv("AGENT_SKILL_CHARS", "3000"))
+    # Jira Cloud (read-only). When all three are set, the jira_issue and
+    # jira_search tools are offered to the model; otherwise they stay hidden.
+    # The token is an API token from id.atlassian.com -> Security -> API tokens.
+    jira_url: str = os.getenv("AGENT_JIRA_URL", "")      # e.g. https://you.atlassian.net
+    jira_email: str = os.getenv("AGENT_JIRA_EMAIL", "")  # the account the token belongs to
+    jira_token: str = os.getenv("AGENT_JIRA_TOKEN", "")
+    jira_timeout: int = int(os.getenv("AGENT_JIRA_TIMEOUT", "30"))  # seconds per Jira request
     debug: bool = os.getenv("AGENT_DEBUG", "") not in ("", "0", "false")
+    # Append every outgoing HTTP request and incoming reply to this file.
+    # Quieter than AGENT_DEBUG (which prints to the console); the Authorization
+    # bearer token is redacted. Empty = off.
+    http_log: str = os.getenv("AGENT_HTTP_LOG", "")
     # vLLM: keep special tokens such as <tool_call> in the output. Qwen's tool-call
     # markup is made of special tokens, which vLLM strips by default, so the
     # model's tool call silently vanishes. Set to 0 for servers that reject it.

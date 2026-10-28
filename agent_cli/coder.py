@@ -26,7 +26,7 @@ from .android import (
     is_build_config_file, map_file_to_module, module_display_name, run_ktlint,
 )
 from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
-from .config import Config
+from .config import Config, UNLIMITED_CHARS
 from .notes import find_notes, gather_init_info, load_notes, notes_exist, INIT_PROMPT
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display, Skill
 from .review import (
@@ -168,6 +168,9 @@ HELP = """Commands:
   /ask <question>      one question without edits (or /mode ask)
   /code <request>      one request with edits (or /mode code)
   /mode ask|code       switch mode
+  /micro <request>     run the request through the micro-agent loop
+  /analyze <request>   read-only: analyse code and write a doc under docs/analysis/
+  /jira-plan <KEY>     read-only: read a Jira issue and list ordered subtasks
   /diff                show the last edits
   /undo                undo the last edits
   /run <command>       run a command; optionally share output with the model
@@ -385,7 +388,7 @@ class Coder:
             self._warned_trim = True
         if history and history[0]["role"] == "assistant":
             history.pop(0)
-        if fixed > self.cfg.context_chars:
+        if fixed > self.cfg.context_chars:  # never true when unlimited
             console.print(f"[yellow]Files in the chat are about {fixed // 4} tokens, over the "
                           f"budget of ~{self.cfg.context_chars // 4}. /drop some files or use "
                           "/read for reference-only ones.[/yellow]")
@@ -410,7 +413,8 @@ class Coder:
         total = sum(n for _, n in parts)
         for name, n in parts:
             console.print(f"  ~{n // 4:>6} tokens  {name}")
-        console.print(f"  ~{total // 4:>6} tokens  TOTAL (budget ~{self.cfg.context_chars // 4})")
+        budget = "no limit" if self.cfg.context_chars >= UNLIMITED_CHARS else f"~{self.cfg.context_chars // 4}"
+        console.print(f"  ~{total // 4:>6} tokens  TOTAL (budget {budget})")
 
     # ---- talking to the model ---------------------------------------------------------
 
@@ -1462,6 +1466,52 @@ class Coder:
         for d in self.last_diffs:
             console.print(Syntax(d, "diff", theme="ansi_dark"))
 
+    def micro(self, request: str) -> None:
+        """Run a request through the micro-agent loop.
+
+        A read/explain/diagram request ("show the class diagram", "explain how X
+        works") is routed to the read-only analysis pipeline, which reads the
+        relevant files and writes a document without touching any source. Every
+        other request goes to the edit loop (Locator/Planner/Editor/...).
+        """
+        if self.mode != "code":
+            console.print("[yellow]/micro only runs in code mode.[/yellow]")
+            return
+        from .micro import MicroOrchestrator, AnalysisOrchestrator, is_analysis_request
+        if is_analysis_request(request):
+            console.print("[dim]Read-only analysis request: running the analysis "
+                          "pipeline (no source files will be edited).[/dim]")
+            AnalysisOrchestrator(self).run(request)
+        else:
+            MicroOrchestrator(self).run(request)
+
+    def analyze(self, request: str) -> None:
+        """Run the read-only analysis pipeline directly (Locator/Analyst/Writer).
+
+        Reads the relevant files and writes a Markdown document under
+        docs/analysis/; never edits source. Use this to force analysis even when
+        the request does not look like a read request.
+        """
+        if self.mode != "code":
+            console.print("[yellow]/analyze only runs in code mode.[/yellow]")
+            return
+        from .micro import AnalysisOrchestrator
+        AnalysisOrchestrator(self).run(request)
+
+    def jira_plan(self, key: str) -> None:
+        """Read a Jira issue and print an ordered subtask plan (read-only).
+
+        Fetches the ticket, locates the relevant code, and runs the Planner to
+        break the work into small, ordered subtasks. Never edits source, writes
+        a document, or sends anything back to Jira. Needs Jira configured
+        (AGENT_JIRA_URL / AGENT_JIRA_EMAIL / AGENT_JIRA_TOKEN).
+        """
+        if self.mode != "code":
+            console.print("[yellow]/jira-plan only runs in code mode.[/yellow]")
+            return
+        from .micro import JiraPlanOrchestrator
+        JiraPlanOrchestrator(self).run(key)
+
     def run(self, command: str) -> None:
         failed = True
         try:
@@ -1491,6 +1541,7 @@ def main(
     files: Optional[List[str]] = typer.Argument(None, help="Files to add to the chat."),
     read: Optional[List[str]] = typer.Option(None, "--read", "-r", help="Read-only files."),
     message: Optional[str] = typer.Option(None, "--message", help="Send one message and exit."),
+    micro: Optional[str] = typer.Option(None, "--micro", help="Run one request through the micro-agent loop and exit."),
     ask: bool = typer.Option(False, "--ask", help="Start in ask mode (no edits)."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Don't ask for confirmations."),
     model: Optional[str] = typer.Option(None, "--model", "-m"),
@@ -1530,6 +1581,10 @@ def main(
 
     if doc is not None:
         coder.doc_gen(doc, update_mode=doc_update)
+        return
+
+    if micro is not None:
+        coder.micro(micro)
         return
 
     if message:
@@ -1595,6 +1650,12 @@ def main(
                 coder.send(arg, mode="ask") if arg else setattr(coder, "mode", "ask")
             elif cmd == "/code":
                 coder.send(arg, mode="code") if arg else setattr(coder, "mode", "code")
+            elif cmd == "/micro":
+                coder.micro(arg) if arg else console.print("[yellow]Usage: /micro <request>[/yellow]")
+            elif cmd == "/analyze":
+                coder.analyze(arg) if arg else console.print("[yellow]Usage: /analyze <request>[/yellow]")
+            elif cmd in ("/jira-plan", "/jira_plan"):
+                coder.jira_plan(arg) if arg else console.print("[yellow]Usage: /jira-plan <ISSUE-KEY>[/yellow]")
             elif cmd == "/undo":
                 coder.undo()
             elif cmd == "/diff":

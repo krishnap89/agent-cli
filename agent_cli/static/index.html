@@ -701,8 +701,8 @@ input:focus, textarea:focus, select:focus {
     <input type="number" id="setTemp" step="0.1" min="0" max="2">
     <label>Max Tokens</label>
     <input type="number" id="setMaxTokens" step="256" min="256">
-    <label>Context Budget (chars)</label>
-    <input type="number" id="setContextChars" step="1000" min="4000">
+    <label>Context Budget (chars, 0 = no limit)</label>
+    <input type="number" id="setContextChars" step="1000" min="0" placeholder="0 = no limit">
     <div class="btn-row">
       <button onclick="testConnection()">Test Connection</button>
       <button onclick="closeSettings()">Cancel</button>
@@ -887,7 +887,8 @@ async function handleSlashCommand(cmd, arg) {
       let lines = data.parts.map(p =>
         "  ~" + String(p.tokens).padStart(6) + " tokens  " + p.name
       );
-      lines.push("  ~" + String(data.total_tokens).padStart(6) + " tokens  TOTAL (budget ~" + data.budget_tokens + ")");
+      const budgetStr = data.budget_tokens == null ? "no limit" : "~" + data.budget_tokens;
+      lines.push("  ~" + String(data.total_tokens).padStart(6) + " tokens  TOTAL (budget " + budgetStr + ")");
       msgEl.textContent = "";
       const pre = document.createElement("pre");
       pre.textContent = lines.join("\n");
@@ -1483,7 +1484,9 @@ async function updateTokens() {
     fill.style.width = d.pct + "%";
     fill.className = "token-bar-fill" + (d.pct > 90 ? " danger" : d.pct > 70 ? " warn" : "");
     document.getElementById("tokenLabel").textContent =
-      "~" + d.used_tokens.toLocaleString() + "/" + d.budget_tokens.toLocaleString() + " tokens";
+      d.budget_tokens == null
+        ? "~" + d.used_tokens.toLocaleString() + " tokens (no limit)"
+        : "~" + d.used_tokens.toLocaleString() + "/" + d.budget_tokens.toLocaleString() + " tokens";
   } catch (e) {}
 }
 

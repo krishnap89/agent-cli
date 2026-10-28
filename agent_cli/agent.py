@@ -8,7 +8,8 @@ from rich.markdown import Markdown
 from .config import CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION, Config, SYSTEM_PROMPT
 from .llm import LLMError, chat
 from .notes import load_notes
-from .tools import TOOL_SCHEMAS, ToolError, Tools
+from .tools import TOOL_SCHEMAS, JIRA_TOOL_SCHEMAS, ToolError, Tools
+from .jira import is_configured as is_jira_configured
 
 console = Console()
 
@@ -81,10 +82,16 @@ def _xml_value(value: str):
         return v
 
 
-def render_tool_docs() -> str:
-    """Turn the JSON schemas into prompt text the model can read."""
+def render_tool_docs(cfg=None) -> str:
+    """Turn the JSON schemas into prompt text the model can read.
+
+    The read-only Jira tools are appended only when Jira is configured, so the
+    model isn't told about tools it can't use."""
+    schemas = list(TOOL_SCHEMAS)
+    if cfg is not None and is_jira_configured(cfg):
+        schemas += JIRA_TOOL_SCHEMAS
     docs = []
-    for t in TOOL_SCHEMAS:
+    for t in schemas:
         props = t["input_schema"].get("properties", {})
         required = set(t["input_schema"].get("required", []))
         params = ", ".join(
@@ -164,6 +171,29 @@ def parse_tool_calls(text: str) -> tuple[list[dict], list[str]]:
     return calls, errors
 
 
+_CREATE_FILE_RE = re.compile(
+    r"\b(creat\w*|generat\w*|writ\w*|mak\w*|add|save)\b.{0,40}?"
+    r"\b(file|readme|\.\w{1,6}\b|\w+\.(md|py|txt|json|ya?ml|html|css|js|ts|sh|toml|cfg|ini))",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _asks_to_create_file(prompt: str) -> bool:
+    """Heuristic: did the user ask to create/generate/write a file?"""
+    return bool(_CREATE_FILE_RE.search(prompt))
+
+
+def _looks_like_file_body(text: str) -> bool:
+    """Heuristic: the reply is (or contains) file content rather than a short answer.
+
+    A fenced code block, or a reply that opens with a document/code marker.
+    """
+    if "```" in text:
+        return True
+    head = text.lstrip()[:40]
+    return head.startswith(("# ", "<!DOCTYPE", "<html", "<?xml", "{", "import ", "from ", "#!"))
+
+
 class Agent:
     def __init__(self, cfg: Config, chat_only: bool = False):
         self.cfg = cfg
@@ -178,7 +208,7 @@ class Agent:
         else:
             system = SYSTEM_PROMPT.format(
                 workdir=self.cfg.workdir,
-                tool_docs=render_tool_docs(),
+                tool_docs=render_tool_docs(self.cfg),
                 repo_map_section=self._repo_map_section(),
             )
             if self.cfg.notes_enabled:
@@ -210,6 +240,7 @@ class Agent:
         self.messages.append({"role": "user", "content": prompt})
 
         nudged = False
+        file_nudged = False
         started = time.monotonic()
         tool_count = 0
         for _ in range(self.cfg.max_turns):
@@ -293,6 +324,23 @@ class Agent:
             if not calls and not errors:
                 if reply.finish_reason == "length":
                     console.print("[yellow](reply was cut off: raise AGENT_MAX_TOKENS)[/yellow]")
+                # The model sometimes answers a "create a file" request by printing
+                # the file content in a code block instead of calling write_file.
+                # Nudge it once to actually write it, then let it answer normally.
+                if (not self.chat_only and not file_nudged
+                        and _asks_to_create_file(prompt) and _looks_like_file_body(text)):
+                    file_nudged = True
+                    console.print("[dim](model printed file content instead of writing it; "
+                                  "asking it to call write_file)[/dim]")
+                    self.messages.append({
+                        "role": "user",
+                        "content": ("You printed the file content but did not create the file. "
+                                    "A code block does nothing on its own. Emit a single "
+                                    "write_file tool call now, with the full content in the "
+                                    "tool call's `content` field, in the <tool_call> format. "
+                                    "Do not print the content again outside the tool call."),
+                    })
+                    continue
                 self._print_footer(started, tool_count)
                 return  # plain answer = done
 
