@@ -5,7 +5,8 @@ import time
 from rich.console import Console
 from rich.markdown import Markdown
 
-from .config import CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION, Config, SYSTEM_PROMPT
+from .config import (ACTION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION,
+                     Config, SYSTEM_PROMPT)
 from .llm import LLMError, chat
 from .notes import load_notes
 from .tools import TOOL_SCHEMAS, JIRA_TOOL_SCHEMAS, ToolError, Tools
@@ -171,6 +172,123 @@ def parse_tool_calls(text: str) -> tuple[list[dict], list[str]]:
     return calls, errors
 
 
+# --- ACTION-line tool protocol (cfg.tool_format == "action") -----------------
+# For models that return empty content for the XML <tool_call> form but will
+# happily write plain prose (e.g. Nemotron). Each tool call is a line:
+#   ACTION <tool> key=value key=value ...
+# edit_file instead carries OLD/NEW heredoc blocks after the line, and the
+# list-valued tools (apply_patch, todo) carry a single arg=<inline JSON>.
+ACTION_LINE_RE = re.compile(r"^\s*ACTION\s+([\w.-]+)\s*(.*)$")
+# key=value pairs on an ACTION line: a value runs up to the next " key=" or EOL,
+# so values may contain spaces without quoting.
+_KV_RE = re.compile(r"(\w+)=(.*?)(?=\s+\w+=|$)")
+# Numeric args that should become ints, read from the schemas so the parser
+# stays in step with the tools.
+_INT_ARGS = {"start_line", "end_line"}
+
+
+def _action_scalar(value: str):
+    """Turn an ACTION value string into an int/bool/number where it clearly is
+    one, else leave it as the raw (stripped) string."""
+    v = value.strip()
+    low = v.lower()
+    if low in ("true", "false"):
+        return low == "true"
+    if re.fullmatch(r"-?\d+", v):
+        return int(v)
+    return v
+
+
+def parse_action_calls(text: str) -> tuple[list[dict], list[str]]:
+    """Parse ACTION-line tool calls. Returns the same (calls, errors) shape as
+    parse_tool_calls, so the rest of the loop is unchanged."""
+    calls, errors = [], []
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        m = ACTION_LINE_RE.match(lines[i])
+        if not m:
+            i += 1
+            continue
+        name, rest = m.group(1), m.group(2).strip()
+        i += 1
+
+        # edit_file: path on the ACTION line, then <<<OLD..OLD and <<<NEW..NEW.
+        if name == "edit_file":
+            path = (dict(_KV_RE.findall(rest)).get("path") or "").strip()
+            old, new, ok = [], [], True
+            for tag, bucket in (("OLD", old), ("NEW", new)):
+                while i < len(lines) and not lines[i].strip().startswith(f"<<<{tag}"):
+                    if ACTION_LINE_RE.match(lines[i]):  # ran into the next call
+                        break
+                    i += 1
+                if i >= len(lines) or not lines[i].strip().startswith(f"<<<{tag}"):
+                    errors.append(f"edit_file for {path or '?'} is missing its <<<{tag} block.")
+                    ok = False
+                    break
+                i += 1  # past the <<<TAG line
+                while i < len(lines) and lines[i].strip() != tag:
+                    bucket.append(lines[i])
+                    i += 1
+                i += 1  # past the closing TAG line
+            if ok:
+                calls.append({"name": "edit_file", "arguments": {
+                    "path": path, "old_str": "\n".join(old), "new_str": "\n".join(new)}})
+            continue
+
+        # List-valued tools: a single arg=<inline JSON>.
+        if name in ("apply_patch", "todo"):
+            raw = rest[rest.find("=") + 1:].strip() if "=" in rest else ""
+            try:
+                value = json.loads(raw)
+            except json.JSONDecodeError as e:
+                errors.append(f"Could not parse JSON arg of {name} ({e}): {raw[:200]}")
+                continue
+            key = "edits" if name == "apply_patch" else "action"
+            # todo's JSON carries the whole argument object; apply_patch's is the
+            # edits list. Accept either an object (used as-is) or a bare value.
+            args = value if isinstance(value, dict) else {key: value}
+            calls.append({"name": name, "arguments": args})
+            continue
+
+        # Simple tools: key=value pairs.
+        args = {}
+        for k, v in _KV_RE.findall(rest):
+            args[k] = int(v) if k in _INT_ARGS and re.fullmatch(r"-?\d+", v.strip()) \
+                else _action_scalar(v)
+        calls.append({"name": name, "arguments": args})
+    return calls, errors
+
+
+def strip_action_blocks(text: str) -> str:
+    """Remove ACTION lines and their OLD/NEW heredoc bodies, leaving the prose
+    the model wrote for the user."""
+    out, lines, i = [], text.splitlines(), 0
+    in_heredoc = None  # "OLD" or "NEW" while inside a block
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        if in_heredoc:
+            if stripped == in_heredoc:
+                in_heredoc = None
+            i += 1
+            continue
+        if ACTION_LINE_RE.match(line):
+            i += 1
+            continue
+        if stripped.startswith("<<<OLD"):
+            in_heredoc = "OLD"
+            i += 1
+            continue
+        if stripped.startswith("<<<NEW"):
+            in_heredoc = "NEW"
+            i += 1
+            continue
+        out.append(line)
+        i += 1
+    return "\n".join(out).strip()
+
+
 _CREATE_FILE_RE = re.compile(
     r"\b(creat\w*|generat\w*|writ\w*|mak\w*|add|save)\b.{0,40}?"
     r"\b(file|readme|\.\w{1,6}\b|\w+\.(md|py|txt|json|ya?ml|html|css|js|ts|sh|toml|cfg|ini))",
@@ -206,7 +324,9 @@ class Agent:
         if chat_only:
             system = CHAT_SYSTEM_PROMPT
         else:
-            system = SYSTEM_PROMPT.format(
+            template = (ACTION_SYSTEM_PROMPT if self.cfg.tool_format == "action"
+                        else SYSTEM_PROMPT)
+            system = template.format(
                 workdir=self.cfg.workdir,
                 tool_docs=render_tool_docs(self.cfg),
                 repo_map_section=self._repo_map_section(),
@@ -268,6 +388,11 @@ class Agent:
                     console.print(f"[dim]\N{THOUGHT BALLOON} {gist}[/dim]")
             if self.chat_only:  # no tools: show everything as-is
                 calls, errors, visible = [], [], text
+            elif self.cfg.tool_format == "action":
+                calls, errors = parse_action_calls(text)
+                # Hide the ACTION lines (and any OLD/NEW blocks) from the visible
+                # reply, leaving only the prose the model wrote for the user.
+                visible = strip_action_blocks(text)
             else:
                 calls, errors = parse_tool_calls(text)
                 visible = TOOL_CALL_RE.sub("", text).strip()
