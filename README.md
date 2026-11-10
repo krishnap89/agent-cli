@@ -26,7 +26,9 @@ or type """ on its own line to start and end a multi-line message.
 
 Env: AGENT_BASE_URL, AGENT_MODEL, AGENT_API_KEY, AGENT_MAX_TOKENS,
 AGENT_TEMPERATURE, AGENT_TIMEOUT, AGENT_MAX_TURNS,
-AGENT_DEBUG=1 (print raw server responses), AGENT_STREAM (default 1),
+AGENT_DEBUG=1 (print raw server responses),
+AGENT_HTTP_LOG=<path> (append every HTTP request and reply to that file, bearer
+token redacted; unset = off), AGENT_STREAM (default 1),
 AGENT_RETRIES (default 3, retries 429/502/503/504).
 AGENT_KEEP_SPECIAL_TOKENS (default 1: sends vLLM `skip_special_tokens: false`, so
 Qwen's `<tool_call>` markup isn't stripped; set 0 for servers that reject it),
