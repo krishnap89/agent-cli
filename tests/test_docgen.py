@@ -688,7 +688,7 @@ class TestFormatDocReport(unittest.TestCase):
 
     def test_update_report(self):
         report = format_doc_report(0, 1, 0, 0, 3, True)
-        self.assertIn("3 outdated KDoc", report)
+        self.assertIn("3 outdated doc comments", report)
 
     def test_single_file_singular(self):
         report = format_doc_report(1, 1, 0, 0, 0, True)

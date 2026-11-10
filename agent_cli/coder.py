@@ -181,7 +181,7 @@ HELP = """Commands:
   /modules             list detected modules and file-to-module mapping
   /review [target]     review changes (uncommitted, staged, commits, branch, files)
   /test-gen <class>    generate unit tests for a Kotlin class
-  /doc <target>        add KDoc to Kotlin declarations (class, file, folder)
+  /doc <target>        add KDoc/Javadoc to Kotlin or Java declarations (class, file, folder)
   /skills              list available skills
   /skill <name>        pin a skill (stays active until /skill off)
   /skill off           unpin the current skill
@@ -1230,12 +1230,12 @@ class Coder:
     # ---- doc (KDoc generation) -----------------------------------------------------------
 
     def doc_gen(self, target: str, update_mode: bool = False) -> None:
-        """Generate KDoc for Kotlin declarations."""
+        """Generate KDoc for Kotlin and Javadoc for Java declarations."""
         from .docgen import (
             scan_declarations, filter_declarations, detect_kdoc_style,
-            build_style_prompt, build_doc_messages, find_outdated_kdoc,
+            build_doc_messages, find_outdated_kdoc,
             verify_code_unchanged, verify_kdoc_balanced, resolve_doc_target,
-            format_doc_report, reindent_kdoc_blocks,
+            format_doc_report, reindent_kdoc_blocks, language_of, doc_name,
         )
 
         repo_map_files = {}  # type: Dict[str, Any]
@@ -1252,18 +1252,22 @@ class Coder:
 
         if len(kt_files) > 10:
             if not (self.cfg.auto_approve or Confirm.ask(
-                    f"{len(kt_files)} Kotlin files found. Continue?", default=True)):
+                    f"{len(kt_files)} source files found. Continue?", default=True)):
                 return
 
-        # Detect style from existing KDoc
+        # Detect style from existing KDoc/Javadoc, once per language present
         module_path = ""
         if kt_files:
             parts = kt_files[0].split("/")
             if "src" in parts:
                 module_path = "/".join(parts[:parts.index("src")])
-        style = detect_kdoc_style(self.root, module_path)
-        console.print(f"[dim]Style: {'tags' if style['uses_tags'] else 'prose'}, "
-                       f"{style['summary_style']}, {style['max_width']} cols[/dim]")
+        styles = {}  # type: Dict[str, Dict[str, Any]]
+        for lang in dict.fromkeys(language_of(f) for f in kt_files):
+            style = detect_kdoc_style(self.root, module_path, lang=lang)
+            styles[lang] = style
+            console.print(f"[dim]{doc_name(lang)} style: "
+                           f"{'tags' if style['uses_tags'] else 'prose'}, "
+                           f"{style['summary_style']}, {style['max_width']} cols[/dim]")
 
         notes_text = ""
         if self.cfg.notes_enabled:
@@ -1286,7 +1290,9 @@ class Coder:
                 console.print(f"[yellow]Cannot read {rel}: {e}[/yellow]")
                 continue
 
-            decls = scan_declarations(source)
+            lang = language_of(rel)
+            style = styles[lang]
+            decls = scan_declarations(source, lang=lang)
             all_decls = list(decls)
 
             # Count skips
@@ -1302,11 +1308,12 @@ class Coder:
                 visibility_filter=self.cfg.doc_visibility,
                 include_properties=self.cfg.doc_properties,
                 update_mode=update_mode,
+                lang=lang,
             )
 
             # In update mode, also find outdated ones
             if update_mode:
-                outdated = find_outdated_kdoc(source, all_decls, style["uses_tags"])
+                outdated = find_outdated_kdoc(source, all_decls, style["uses_tags"], lang=lang)
                 outdated_names = {d.name for d in outdated}
                 to_doc = [d for d in to_doc if not d.has_kdoc or d.name in outdated_names]
 
@@ -1329,7 +1336,7 @@ class Coder:
 
                 messages = build_doc_messages(
                     rel, current_source, batch, style,
-                    notes_text=notes_text, update_mode=batch_update,
+                    notes_text=notes_text, update_mode=batch_update, lang=lang,
                 )
                 text = self._call_model(messages)
                 if text is None:
@@ -1550,7 +1557,7 @@ def main(
     init_notes: bool = typer.Option(False, "--init-notes", help="Generate AGENT.md project notes."),
     review: Optional[str] = typer.Option(None, "--review", help="Review changes and exit. Targets: staged, <branch>, <file>."),
     test_gen: Optional[str] = typer.Option(None, "--test-gen", help="Generate tests for a Kotlin class and exit."),
-    doc: Optional[str] = typer.Option(None, "--doc", help="Add KDoc to a target (class, file, folder) and exit."),
+    doc: Optional[str] = typer.Option(None, "--doc", help="Add KDoc/Javadoc to a Kotlin or Java target (class, file, folder) and exit."),
     doc_update: bool = typer.Option(False, "--doc-update", help="Update outdated KDoc instead of adding new."),
 ):
     cfg = Config(workdir=workdir.resolve(), auto_approve=yes)

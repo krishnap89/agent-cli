@@ -1,8 +1,12 @@
-"""KDoc generation for Kotlin declarations.
+"""KDoc / Javadoc generation for Kotlin and Java declarations.
 
-Implements /doc: scan Kotlin files for undocumented declarations, detect the
-project's existing KDoc style, generate KDoc via the model with SEARCH/REPLACE
-blocks, and verify that only comments changed (no code modifications).
+Implements /doc: scan Kotlin (.kt) or Java (.java) files for undocumented
+declarations, detect the project's existing doc-comment style, generate KDoc or
+Javadoc via the model with SEARCH/REPLACE blocks, and verify that only comments
+changed (no code modifications).
+
+The language is picked per file from its extension (see language_of); every
+public helper takes a lang="kotlin" keyword so Kotlin behaviour is unchanged.
 """
 import os
 import re
@@ -79,14 +83,27 @@ class Declaration:
         self.annotations = annotations
 
 
-def scan_declarations(source: str) -> List[Declaration]:
-    """Find all declarations in a Kotlin source file.
+def language_of(path: str) -> str:
+    """'java' for .java files, otherwise 'kotlin'."""
+    return "java" if path.endswith(".java") else "kotlin"
 
-    Handles classes, interfaces, objects, enums, functions (including
+
+def doc_name(lang: str) -> str:
+    """The doc-comment name for a language: 'Javadoc' or 'KDoc'."""
+    return "Javadoc" if lang == "java" else "KDoc"
+
+
+def scan_declarations(source: str, lang: str = "kotlin") -> List[Declaration]:
+    """Find all declarations in a Kotlin (default) or Java source file.
+
+    Kotlin: classes, interfaces, objects, enums, functions (including
     extension functions, generic functions, multi-line signatures,
-    expression bodies), and properties. Ignores content inside strings
-    and comments.
+    expression bodies), and properties.
+    Java: see _scan_java.
+    Ignores content inside strings and comments.
     """
+    if lang == "java":
+        return _scan_java(source)
     lines = source.splitlines()
     cleaned = _strip_strings_and_comments(source)
     cleaned_lines = cleaned.splitlines()
@@ -173,39 +190,7 @@ def _build_declaration(
 
     is_override = "override " in line or "override\t" in line
 
-    # Look backwards for annotations and KDoc
-    annotations = []  # type: List[str]
-    start_idx = decl_idx
-    j = decl_idx - 1
-    while j >= 0:
-        prev = lines[j].strip()
-        if not prev:
-            j -= 1
-            continue
-        if _ANNOTATION_RE.match(prev):
-            annotations.insert(0, prev)
-            start_idx = j
-            j -= 1
-            continue
-        break
-
-    # Check for KDoc above (above annotations if any)
-    has_kdoc = False
-    check_from = start_idx - 1
-    while check_from >= 0 and not lines[check_from].strip():
-        check_from -= 1
-    if check_from >= 0:
-        # Look for */ ending
-        if lines[check_from].strip().endswith("*/"):
-            # Find the matching /**
-            k = check_from
-            while k >= 0:
-                if "/**" in lines[k]:
-                    has_kdoc = True
-                    start_idx = k
-                    break
-                k -= 1
-
+    start_idx, has_kdoc, annotations = _lookback(lines, decl_idx)
     start_line = start_idx + 1  # 1-indexed
 
     # Build signature (may span multiple lines for multi-line params)
@@ -240,6 +225,54 @@ def _build_declaration(
         signature=signature,
         annotations=annotations,
     )
+
+
+def _lookback(
+    lines: List[str],
+    decl_idx: int,
+    strict_annotations: bool = False,
+) -> Tuple[int, bool, List[str]]:
+    """Walk up from a declaration line over annotations and a /** */ block.
+
+    Returns (start_idx, has_doc, annotations): start_idx is the 0-indexed first
+    line belonging to the declaration (its doc comment or first annotation).
+    Shared by the Kotlin and Java scanners; both use /** */ doc comments.
+
+    strict_annotations (Java): a line counts as an annotation only if it holds
+    nothing but annotations, so a one-line member such as
+    "@Nullable public String name() { ... }" is not taken for one.
+    """
+    annotations = []  # type: List[str]
+    start_idx = decl_idx
+    j = decl_idx - 1
+    while j >= 0:
+        prev = lines[j].strip()
+        if not prev:
+            j -= 1
+            continue
+        if _ANNOTATION_RE.match(prev) and (
+                not strict_annotations or _JAVA_ANN_ONLY_RE.match(prev)):
+            annotations.insert(0, prev)
+            start_idx = j
+            j -= 1
+            continue
+        break
+
+    # Check for a doc comment above (above annotations if any)
+    has_doc = False
+    check_from = start_idx - 1
+    while check_from >= 0 and not lines[check_from].strip():
+        check_from -= 1
+    if check_from >= 0 and lines[check_from].strip().endswith("*/"):
+        # Find the matching /**
+        k = check_from
+        while k >= 0:
+            if "/**" in lines[k]:
+                has_doc = True
+                start_idx = k
+                break
+            k -= 1
+    return start_idx, has_doc, annotations
 
 
 def _find_body_end(cleaned_lines: List[str], start: int) -> int:
@@ -362,6 +395,218 @@ def _strip_strings_and_comments(source: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Java declaration scanner
+# ---------------------------------------------------------------------------
+
+_JAVA_MODS_RE = (
+    r'(?:(?:public|protected|private|static|final|abstract|synchronized|native|'
+    r'default|strictfp|transient|volatile|sealed|non-sealed)\s+)*'
+)
+_JAVA_IDENT = r'[A-Za-z_$][\w$]*'
+# A type: qualified name, optional generics, optional array dims or varargs.
+_JAVA_TYPE = r'[A-Za-z_$][\w$.]*(?:\s*<.*>)?(?:\s*\[\s*\])*'
+
+_JAVA_TYPE_DECL_RE = re.compile(
+    r'^\s*' + _JAVA_MODS_RE + r'(class|interface|enum|record|@interface)\s+(' + _JAVA_IDENT + r')'
+)
+_JAVA_METHOD_RE = re.compile(
+    r'^\s*' + _JAVA_MODS_RE + r'(?:<.+?>\s*)?(' + _JAVA_TYPE + r')\s+(' + _JAVA_IDENT + r')\s*\('
+)
+_JAVA_CTOR_RE = re.compile(
+    r'^\s*' + _JAVA_MODS_RE + r'(?:<.+?>\s*)?(' + _JAVA_IDENT + r')\s*\('
+)
+_JAVA_FIELD_RE = re.compile(
+    r'^\s*' + _JAVA_MODS_RE + r'(' + _JAVA_TYPE + r')\s+(' + _JAVA_IDENT + r')\s*(?:=|;|,)'
+)
+# Leading annotations on the same line as a declaration, e.g. "@Override public".
+_JAVA_INLINE_ANN_RE = re.compile(r'^(\s*)((?:@(?!interface\b)[\w.]+(?:\s*\([^)]*\))?\s+)+)')
+# Any annotation token (used to drop ones that sit after the modifiers).
+_JAVA_ANY_ANN_RE = re.compile(r'@(?!interface\b)[\w.]+(?:\s*\([^)]*\))?\s+')
+# A line holding only annotations (an unclosed "(" allows multi-line arguments).
+_JAVA_ANN_ONLY_RE = re.compile(r'^(?:@[\w.]+(?:\s*\([^)]*\)?)?\s*)+$')
+# Words that can sit where a return type would, but start a statement instead.
+_JAVA_NOT_TYPES = {
+    "return", "new", "throw", "else", "case", "package", "import", "yield",
+    "assert", "goto", "if", "for", "while", "switch", "catch", "do", "try",
+}
+_JAVA_TYPE_KINDS = {"class": "class", "interface": "interface", "enum": "enum",
+                    "record": "record", "@interface": "annotation"}
+
+
+def _scan_java(source: str) -> List[Declaration]:
+    """Find declarations in a Java source file.
+
+    Handles classes, interfaces, enums, records and annotation types (nested
+    too), methods (generic, multi-line signatures, abstract/interface methods),
+    constructors and fields. Only lines directly inside a type body are
+    considered, so statements inside method bodies, lambdas and anonymous
+    classes are never mistaken for declarations.
+
+    Kinds: "class", "interface", "enum", "record", "annotation", "method",
+    "constructor", "field". Visibility is "public", "protected", "private" or
+    "package" (no modifier); interface members without a modifier are public.
+    is_override is set from an @Override annotation.
+    """
+    lines = source.splitlines()
+    cleaned_lines = _strip_strings_and_comments(source).splitlines()
+    while len(cleaned_lines) < len(lines):
+        cleaned_lines.append("")
+
+    decls = []  # type: List[Declaration]
+    # Each entry: ("type", type_name, type_kind) for a type body, ("block",) otherwise.
+    stack = []  # type: List[Tuple[str, ...]]
+    pending_type = None  # type: Optional[Tuple[str, str]]
+
+    for i, raw in enumerate(cleaned_lines):
+        top = stack[-1] if stack else None
+        at_member_level = top is not None and top[0] == "type"
+        at_top_level = not stack
+
+        if (at_member_level or at_top_level) and raw.strip():
+            # Drop same-line annotations so the regexes see the modifiers.
+            line = raw
+            inline_anns = []  # type: List[str]
+            am = _JAVA_INLINE_ANN_RE.match(raw)
+            if am:
+                inline_anns = re.findall(r'@[\w.]+(?:\s*\([^)]*\))?', am.group(2))
+                line = am.group(1) + raw[am.end():]
+            # Type-use annotations after modifiers ("public @NonNull String f()")
+            line = _JAVA_ANY_ANN_RE.sub("", line)
+
+            found = _match_java_decl(line, top if at_member_level else None, at_top_level)
+            if found is not None:
+                kind, name, prefix = found
+                if kind in _JAVA_TYPE_KINDS.values():
+                    pending_type = (name, kind)
+                decl = _build_java_declaration(
+                    lines, cleaned_lines, i, kind, name, prefix,
+                    enclosing_kind=top[2] if at_member_level else "",
+                    inline_annotations=inline_anns,
+                )
+                decls.append(decl)
+
+        # Update the brace stack for this line.
+        for ch in raw:
+            if ch == "{":
+                if pending_type is not None:
+                    stack.append(("type", pending_type[0], pending_type[1]))
+                    pending_type = None
+                else:
+                    stack.append(("block",))
+            elif ch == "}":
+                if stack:
+                    stack.pop()
+            elif ch == ";" and pending_type is not None and not stack:
+                pending_type = None
+
+    return decls
+
+
+def _match_java_decl(
+    line: str,
+    enclosing: Optional[Tuple[str, ...]],
+    at_top_level: bool,
+) -> Optional[Tuple[str, str, str]]:
+    """Match one cleaned line against the Java declaration patterns.
+
+    Returns (kind, name, modifier_prefix) or None. modifier_prefix is the text
+    before the name, used to read visibility.
+    """
+    m = _JAVA_TYPE_DECL_RE.match(line)
+    if m:
+        return _JAVA_TYPE_KINDS[m.group(1)], m.group(2), line[:m.start(2)]
+    if at_top_level:
+        return None  # only types live at file level
+
+    enclosing_name = enclosing[1] if enclosing else ""
+
+    m = _JAVA_CTOR_RE.match(line)
+    if m and m.group(1) == enclosing_name:
+        return "constructor", m.group(1), line[:m.start(1)]
+
+    m = _JAVA_METHOD_RE.match(line)
+    if m:
+        ret_type = m.group(1).split("<")[0].strip()
+        if ret_type not in _JAVA_NOT_TYPES and m.group(2) not in _JAVA_NOT_TYPES:
+            return "method", m.group(2), line[:m.start(2)]
+        return None
+
+    m = _JAVA_FIELD_RE.match(line)
+    if m:
+        ftype = m.group(1).split("<")[0].strip()
+        if ftype not in _JAVA_NOT_TYPES:
+            return "field", m.group(2), line[:m.start(2)]
+    return None
+
+
+def _build_java_declaration(
+    lines: List[str],
+    cleaned_lines: List[str],
+    decl_idx: int,
+    kind: str,
+    name: str,
+    prefix: str,
+    enclosing_kind: str,
+    inline_annotations: List[str],
+) -> Declaration:
+    """Build a Declaration for a Java member or type."""
+    visibility = "package"
+    for v in ("public", "protected", "private"):
+        if re.search(r'\b' + v + r'\b', prefix):
+            visibility = v
+            break
+    else:
+        if enclosing_kind in ("interface", "annotation"):
+            visibility = "public"  # interface members are implicitly public
+
+    start_idx, has_doc, annotations = _lookback(lines, decl_idx, strict_annotations=True)
+    annotations = annotations + inline_annotations
+    is_override = any(a == "@Override" or a.startswith("@Override(") for a in annotations)
+
+    sig_lines = [lines[decl_idx]]
+    if kind in ("method", "constructor"):
+        line = cleaned_lines[decl_idx]
+        open_parens = line.count("(") - line.count(")")
+        si = decl_idx + 1
+        while open_parens > 0 and si < len(cleaned_lines):
+            sig_lines.append(lines[si])
+            open_parens += cleaned_lines[si].count("(") - cleaned_lines[si].count(")")
+            si += 1
+
+    return Declaration(
+        kind=kind,
+        name=name,
+        start_line=start_idx + 1,
+        decl_line=decl_idx + 1,
+        end_line=_find_java_body_end(cleaned_lines, decl_idx) + 1,
+        visibility=visibility,
+        has_kdoc=has_doc,
+        is_override=is_override,
+        signature="\n".join(sig_lines),
+        annotations=annotations,
+    )
+
+
+def _find_java_body_end(cleaned_lines: List[str], start: int) -> int:
+    """Last line of a Java declaration: matching '}' of its body, or the line
+    with the terminating ';' for fields and abstract/interface methods."""
+    depth = 0
+    found_open = False
+    for i in range(start, len(cleaned_lines)):
+        for ch in cleaned_lines[i]:
+            if ch == "{":
+                depth += 1
+                found_open = True
+            elif ch == "}":
+                depth -= 1
+                if found_open and depth <= 0:
+                    return i
+            elif ch == ";" and not found_open:
+                return i
+    return max(start, len(cleaned_lines) - 1)
+
+
+# ---------------------------------------------------------------------------
 # Filter declarations for documentation
 # ---------------------------------------------------------------------------
 
@@ -371,11 +616,17 @@ def filter_declarations(
     visibility_filter: str = "internal",  # "public" or "internal"
     include_properties: bool = False,
     update_mode: bool = False,
+    lang: str = "kotlin",
 ) -> List[Declaration]:
     """Filter declarations to those that should be documented.
 
     Skips: private, overrides, already-documented (unless update_mode),
-    generated code, test files.
+    generated code, test files. Properties (Kotlin val/var, Java fields) only
+    when include_properties.
+
+    Java has no `internal`, so visibility_filter maps onto its levels:
+    "public" keeps public + protected (the API other packages and subclasses
+    see); "internal" also keeps package-private members.
     """
     # Skip test files
     if "/src/test/" in rel_path or "/src/androidTest/" in rel_path:
@@ -384,7 +635,11 @@ def filter_declarations(
     if "/build/" in rel_path or "Generated" in rel_path:
         return []
 
-    allowed_vis = {"public", "internal"} if visibility_filter == "internal" else {"public"}
+    if lang == "java":
+        allowed_vis = ({"public", "protected", "package"} if visibility_filter == "internal"
+                       else {"public", "protected"})
+    else:
+        allowed_vis = {"public", "internal"} if visibility_filter == "internal" else {"public"}
 
     result = []  # type: List[Declaration]
     for d in decls:
@@ -392,7 +647,7 @@ def filter_declarations(
             continue
         if d.is_override:
             continue
-        if d.kind in ("val", "var") and not include_properties:
+        if d.kind in ("val", "var", "field") and not include_properties:
             continue
         if d.has_kdoc and not update_mode:
             continue
@@ -408,13 +663,16 @@ def detect_kdoc_style(
     root: Path,
     module_path: str = "",
     max_samples: int = 20,
+    lang: str = "kotlin",
 ) -> Dict[str, Any]:
-    """Sample existing KDoc blocks and derive style rules.
+    """Sample existing KDoc (or, with lang="java", Javadoc) blocks and derive
+    style rules.
 
     Returns {"uses_tags": bool, "summary_style": "third-person"|"imperative",
              "max_width": int, "examples": List[str]}.
     """
-    samples = _collect_kdoc_samples(root, module_path, max_samples)
+    exts = (".java",) if lang == "java" else (".kt", ".kts")
+    samples = _collect_kdoc_samples(root, module_path, max_samples, exts)
 
     if not samples:
         return {
@@ -465,8 +723,14 @@ def detect_kdoc_style(
     }
 
 
-def _collect_kdoc_samples(root: Path, module_path: str, max_samples: int) -> List[str]:
-    """Collect existing KDoc blocks from the module (or project)."""
+def _collect_kdoc_samples(
+    root: Path,
+    module_path: str,
+    max_samples: int,
+    exts: Tuple[str, ...] = (".kt", ".kts"),
+) -> List[str]:
+    """Collect existing /** */ doc blocks from files with the given extensions
+    in the module (or project)."""
     search_dirs = []  # type: List[Path]
     if module_path:
         src = root / module_path / "src" / "main"
@@ -482,7 +746,7 @@ def _collect_kdoc_samples(root: Path, module_path: str, max_samples: int) -> Lis
                 ".git", ".gradle", "build", ".idea", "node_modules", "test", "androidTest",
             }]
             for name in filenames:
-                if not name.endswith(".kt") and not name.endswith(".kts"):
+                if not name.endswith(exts):
                     continue
                 try:
                     text = Path(dirpath, name).read_text(encoding="utf-8", errors="replace")
@@ -506,12 +770,17 @@ def _kdoc_first_line(kdoc: str) -> str:
     return ""
 
 
-def build_style_prompt(style: Dict[str, Any]) -> str:
+def build_style_prompt(style: Dict[str, Any], lang: str = "kotlin") -> str:
     """Build the style section of the generation prompt."""
     parts = []  # type: List[str]
     if style["uses_tags"]:
-        parts.append("Use @param for every parameter, @return for non-Unit functions, "
-                      "@throws only for exceptions this code throws.")
+        if lang == "java":
+            parts.append("Use @param for every parameter (and @param <T> for type parameters), "
+                          "@return for non-void methods, @throws only for exceptions this "
+                          "code throws.")
+        else:
+            parts.append("Use @param for every parameter, @return for non-Unit functions, "
+                          "@throws only for exceptions this code throws.")
     else:
         parts.append("Use prose descriptions, not @param/@return tags.")
 
@@ -523,7 +792,7 @@ def build_style_prompt(style: Dict[str, Any]) -> str:
     parts.append(f"Keep lines under {style['max_width']} characters.")
 
     if style["examples"]:
-        parts.append("Follow this KDoc style:\n" + "\n\n".join(style["examples"][:2]))
+        parts.append(f"Follow this {doc_name(lang)} style:\n" + "\n\n".join(style["examples"][:2]))
 
     return "\n".join(parts)
 
@@ -536,22 +805,25 @@ def find_outdated_kdoc(
     source: str,
     decls: List[Declaration],
     uses_tags: bool,
+    lang: str = "kotlin",
 ) -> List[Declaration]:
-    """Find declarations whose existing KDoc is outdated.
+    """Find declarations whose existing KDoc/Javadoc is outdated.
 
-    Checks: @param names not in signature, missing @param, @return on Unit
-    functions or missing @return on non-Unit.
+    Checks: @param names not in signature, missing @param, @return on
+    Unit/void functions (and Java constructors) or missing @return on others.
     """
     if not uses_tags:
         return []
 
     lines = source.splitlines()
     outdated = []  # type: List[Declaration]
+    is_java = lang == "java"
+    callable_kinds = ("method", "constructor") if is_java else ("fun",)
 
     for d in decls:
         if not d.has_kdoc:
             continue
-        if d.kind not in ("fun",):
+        if d.kind not in callable_kinds:
             continue
 
         # Extract KDoc text
@@ -559,14 +831,23 @@ def find_outdated_kdoc(
         if not kdoc_text:
             continue
 
-        # Extract @param names from KDoc
-        kdoc_params = set(re.findall(r'@param\s+(\w+)', kdoc_text))
+        # Extract @param names from KDoc. Java type parameters are written
+        # "@param <T>"; they are matched against the method's type parameters.
+        param_re = r'@param\s+(<?\w+>?)' if is_java else r'@param\s+(\w+)'
+        kdoc_params = set(re.findall(param_re, kdoc_text))
 
         # Extract parameter names from signature
-        sig_params = set(re.findall(r'(\w+)\s*:', d.signature))
-        # Remove common non-param words
-        sig_params -= {"return", "override", "fun", "suspend", "private",
-                       "public", "internal", "protected", "open", "abstract"}
+        if is_java:
+            sig_params = _java_param_names(d.signature)
+            # Only check @param <T> tags the doc already uses, so a missing
+            # type-parameter tag never flags a block on its own.
+            type_param_tags = {p for p in kdoc_params if p.startswith("<")}
+            sig_params |= type_param_tags & _java_type_params(d.signature)
+        else:
+            sig_params = set(re.findall(r'(\w+)\s*:', d.signature))
+            # Remove common non-param words
+            sig_params -= {"return", "override", "fun", "suspend", "private",
+                           "public", "internal", "protected", "open", "abstract"}
 
         # Check for mismatches
         extra_params = kdoc_params - sig_params
@@ -574,7 +855,10 @@ def find_outdated_kdoc(
 
         # Check @return
         has_return_tag = "@return" in kdoc_text
-        returns_unit = _returns_unit(d.signature)
+        if is_java:
+            returns_unit = d.kind == "constructor" or _java_returns_void(d.signature, d.name)
+        else:
+            returns_unit = _returns_unit(d.signature)
 
         is_outdated = False
         if extra_params:
@@ -613,6 +897,66 @@ def _extract_kdoc_above(lines: List[str], decl_idx: int) -> str:
             return "\n".join(lines[j:end + 1])
         j -= 1
     return ""
+
+
+def _java_param_list(signature: str) -> str:
+    """The text between a Java signature's outer parentheses."""
+    start = signature.find("(")
+    if start < 0:
+        return ""
+    depth = 0
+    for i in range(start, len(signature)):
+        if signature[i] == "(":
+            depth += 1
+        elif signature[i] == ")":
+            depth -= 1
+            if depth == 0:
+                return signature[start + 1:i]
+    return signature[start + 1:]
+
+
+def _java_param_names(signature: str) -> Set[str]:
+    """Parameter names of a Java method/constructor signature.
+
+    Each parameter is "[annotations] [final] Type name"; the name is its last
+    identifier. Commas inside generics (Map<K, V>) are not split on.
+    """
+    params = _java_param_list(signature)
+    names = set()  # type: Set[str]
+    depth = 0
+    current = []  # type: List[str]
+    pieces = []  # type: List[str]
+    for ch in params:
+        if ch in "<(":
+            depth += 1
+        elif ch in ">)":
+            depth -= 1
+        if ch == "," and depth == 0:
+            pieces.append("".join(current))
+            current = []
+        else:
+            current.append(ch)
+    pieces.append("".join(current))
+    for piece in pieces:
+        idents = re.findall(r'[A-Za-z_$][\w$]*', re.sub(r'@[\w.]+(?:\s*\([^)]*\))?', '', piece))
+        if len(idents) >= 2:  # need at least a type and a name
+            names.add(idents[-1])
+    return names
+
+
+def _java_type_params(signature: str) -> Set[str]:
+    """Type parameters declared before a Java method name, as "<T>" strings."""
+    head = signature.split("(", 1)[0]
+    m = re.search(r'<([^()]*)>\s*[\w$.<>\[\]?, ]*\s[A-Za-z_$][\w$]*\s*$', head)
+    if not m:
+        return set()
+    return {"<" + p.split()[0] + ">" for p in m.group(1).split(",") if p.strip()}
+
+
+def _java_returns_void(signature: str, name: str) -> bool:
+    """True if the Java method's return type (the word before its name) is void."""
+    head = signature.split("(", 1)[0]
+    return bool(re.search(r'\bvoid\s+' + re.escape(name) + r'\s*$', head))
 
 
 def _returns_unit(signature: str) -> bool:
@@ -829,7 +1173,40 @@ Rules:
 - For @Composable functions, describe what is shown and what each callback does.
 """
 
-DOC_PROMPT = """Add KDoc to these declarations in {file_path}.
+JAVA_DOC_SYSTEM = """You add Javadoc to Java declarations. You reply ONLY with SEARCH/REPLACE blocks.
+
+Each edit is written as plain text in this exact format:
+
+path/to/File.java
+<<<<<<< SEARCH
+    public void trackView(Product product) {
+=======
+    /**
+     * Records that the given product was viewed.
+     *
+     * @param product the product that was viewed
+     */
+    public void trackView(Product product) {
+>>>>>>> REPLACE
+
+- Put just enough of the declaration line in SEARCH to locate it uniquely, then
+  repeat it in REPLACE with the Javadoc added directly above.
+- Copy the SEARCH lines exactly as they appear in the file, including indentation.
+- Do NOT return the whole file. Do NOT wrap your answer in ```java fences.
+
+Rules:
+- Add Javadoc only. Do not change, reformat or reorder any code.
+- Put each Javadoc directly above the declaration and above its annotations.
+- Describe what the code actually does, based on its body. Do not guess.
+- Be concise: a one-sentence summary ending in a period; add detail only if it is not obvious.
+- Mention side effects, threading (main thread, synchronized), and whether
+  parameters or the return value may be null where relevant.
+- Use {@code ...} for code and {@link ...} only for types that exist in the file or its imports.
+- @throws only for exceptions this code throws. No TODOs, no "This method...".
+- Constructors get @param tags but never @return.
+"""
+
+DOC_PROMPT = """Add {doc} to these declarations in {file_path}.
 
 {style_rules}
 
@@ -841,15 +1218,15 @@ The full file contents follow. Read the function bodies to describe them accurat
 {file_content}
 """
 
-UPDATE_PROMPT = """Update the outdated KDoc blocks in {file_path}.
+UPDATE_PROMPT = """Update the outdated {doc} blocks in {file_path}.
 Keep the original wording where still correct. Only fix:
 - @param names that don't match the current signature
 - Missing @param tags for new parameters
-- @return on Unit functions (remove it) or missing @return on non-Unit functions
+- @return on {no_value} (remove it) or missing @return on the others
 
 {style_rules}
 
-Declarations with outdated KDoc:
+Declarations with outdated {doc}:
 {decl_list}
 
 {file_content}
@@ -863,9 +1240,10 @@ def build_doc_messages(
     style: Dict[str, Any],
     notes_text: str = "",
     update_mode: bool = False,
+    lang: str = "kotlin",
 ) -> List[dict]:
-    """Build messages for one KDoc generation request."""
-    style_rules = build_style_prompt(style)
+    """Build messages for one KDoc (or, with lang="java", Javadoc) request."""
+    style_rules = build_style_prompt(style, lang)
     if notes_text:
         style_rules += "\n\nProject notes (follow these):\n" + notes_text
 
@@ -885,10 +1263,14 @@ def build_doc_messages(
         decl_entries.append(entry)
     decl_list = "\n".join(decl_entries)
 
-    file_content = f"```kotlin\n{source}\n```"
+    is_java = lang == "java"
+    file_content = f"```{'java' if is_java else 'kotlin'}\n{source}\n```"
+    doc = doc_name(lang)
 
     if update_mode:
         prompt = UPDATE_PROMPT.format(
+            doc=doc,
+            no_value="void methods and constructors" if is_java else "Unit functions",
             file_path=file_path,
             style_rules=style_rules,
             decl_list=decl_list,
@@ -896,6 +1278,7 @@ def build_doc_messages(
         )
     else:
         prompt = DOC_PROMPT.format(
+            doc=doc,
             file_path=file_path,
             style_rules=style_rules,
             decl_list=decl_list,
@@ -903,7 +1286,7 @@ def build_doc_messages(
         )
 
     return [
-        {"role": "system", "content": DOC_SYSTEM},
+        {"role": "system", "content": JAVA_DOC_SYSTEM if is_java else DOC_SYSTEM},
         {"role": "user", "content": prompt},
     ]
 
@@ -912,18 +1295,22 @@ def build_doc_messages(
 # Resolve target (reuses testgen's pattern but simplified)
 # ---------------------------------------------------------------------------
 
+# Source files /doc can document.
+_DOC_EXTS = (".kt", ".kts", ".java")
+
 def resolve_doc_target(
     root: Path,
     target: str,
     repo_map_files: Dict[str, Any],
 ) -> List[str]:
-    """Resolve a /doc target to a list of repo-relative .kt file paths.
+    """Resolve a /doc target to a list of repo-relative .kt/.java file paths.
 
     target can be: a class name, FQN, file path, or folder/module path.
+    A folder yields both its Kotlin and Java sources.
     Raises ValueError on failure.
     """
     # File path
-    if target.endswith(".kt") or target.endswith(".kts"):
+    if target.endswith(_DOC_EXTS):
         p = root / target
         if p.is_file():
             return [target]
@@ -938,7 +1325,7 @@ def resolve_doc_target(
                 ".git", ".gradle", "build", ".idea", "node_modules",
             }]
             for name in filenames:
-                if name.endswith(".kt") or name.endswith(".kts"):
+                if name.endswith(_DOC_EXTS):
                     p = Path(dirpath) / name
                     rel = p.relative_to(root).as_posix()
                     if "/src/test/" not in rel and "/src/androidTest/" not in rel:
@@ -946,13 +1333,13 @@ def resolve_doc_target(
                             kt_files.append(rel)
         if kt_files:
             return sorted(kt_files)
-        raise ValueError(f"No Kotlin files found in {target}.")
+        raise ValueError(f"No Kotlin or Java files found in {target}.")
 
     # Class name lookup in repo map
     matches = []  # type: List[str]
     is_fqn = "." in target
     for rel, info in repo_map_files.items():
-        if not rel.endswith(".kt"):
+        if not rel.endswith((".kt", ".java")):
             continue
         if "/src/test/" in rel or "/src/androidTest/" in rel:
             continue
@@ -998,7 +1385,7 @@ def format_doc_report(
         parts.append(f" ({', '.join(skip_parts)} skipped)")
 
     if updated:
-        parts.append(f"\nUpdated {updated} outdated KDoc block{'s' if updated != 1 else ''}")
+        parts.append(f"\nUpdated {updated} outdated doc comment{'s' if updated != 1 else ''}")
 
     if code_verified:
         parts.append("\nCode unchanged: verified")

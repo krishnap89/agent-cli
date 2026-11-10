@@ -326,26 +326,34 @@ coroutines-test, Turbine, Truth, assertk, Robolectric, and arch-testing.
     AGENT_TESTGEN_PLAN=1                ask to approve the plan (0 = auto-accept)
     AGENT_TESTGEN_ALLOW_GRADLE_EDIT=0   allow adding missing test dependencies
 
-## KDoc generation (`/doc`)
-Add KDoc to undocumented Kotlin declarations. Reads function bodies and generates
-accurate descriptions using SEARCH/REPLACE blocks, then verifies that only comments
-changed (no code modifications).
+## KDoc / Javadoc generation (`/doc`)
+Add KDoc to undocumented Kotlin declarations and Javadoc to undocumented Java
+declarations. Reads function bodies and generates accurate descriptions using
+SEARCH/REPLACE blocks, then verifies that only comments changed (no code
+modifications). The language is picked per file from its extension (`.kt` or `.java`).
 
-    /doc ClassName                 class by simple name
+    /doc ClassName                 class by simple name (Kotlin or Java)
     /doc path/to/File.kt           specific file
-    /doc feature/                  all Kotlin files in a folder (>10 asks confirmation)
-    /doc --update ClassName        fix outdated @param/@return in existing KDoc
+    /doc path/to/File.java         specific Java file
+    /doc feature/                  all Kotlin and Java files in a folder (>10 asks confirmation)
+    /doc --update ClassName        fix outdated @param/@return in existing KDoc/Javadoc
     coder --doc "ClassName"        one-shot from command line
     coder --doc-update --doc "ClassName"  update mode from CLI
 
-What gets documented: classes, interfaces, objects, enums, functions. Skipped:
-private declarations, overrides, test files, generated code, already-documented
-(unless `--update`). Properties are skipped unless `AGENT_DOC_PROPERTIES=1`.
+What gets documented: classes, interfaces, objects, enums, functions (Kotlin);
+classes, interfaces, enums, records, annotation types, methods, constructors (Java).
+Skipped: private declarations, overrides (Kotlin `override`, Java `@Override`), test
+files, generated code, already-documented (unless `--update`). Properties (Kotlin
+val/var, Java fields) are skipped unless `AGENT_DOC_PROPERTIES=1`.
 
-Style detection: samples up to 20 existing KDoc blocks to detect tag usage
-(@param/@return vs prose), summary style (third-person vs imperative), and line width.
+Style detection: samples up to 20 existing KDoc blocks (Javadoc blocks for Java
+files) to detect tag usage (@param/@return vs prose), summary style (third-person vs
+imperative), and line width.
 
-    AGENT_DOC_PROPERTIES=0        # include val/var (default: off)
+`AGENT_DOC_VISIBILITY` for Java: `public` documents public and protected members;
+`internal` also documents package-private ones. Interface members count as public.
+
+    AGENT_DOC_PROPERTIES=0        # include val/var / Java fields (default: off)
     AGENT_DOC_VISIBILITY=internal # public|internal (default: internal)
     AGENT_DOC_PER_STEP=8          # declarations per LLM batch
     AGENT_DOC_MAX_FIX=2           # fix rounds for failed edit blocks

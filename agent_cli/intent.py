@@ -57,7 +57,7 @@ _SYSTEM = """You route a developer's message to one of three actions. Reply with
 
 Actions:
 - "test_gen": the user wants unit tests generated for a specific Kotlin class or file.
-- "doc_gen": the user wants documentation (KDoc/comments) generated for a class, file, or folder.
+- "doc_gen": the user wants documentation (KDoc/Javadoc/comments) generated for a class, file, or folder.
 - "chat": anything else — questions, explanations, bug fixes, edits, or a request too vague to name a target.
 
 Rules:
