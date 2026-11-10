@@ -385,3 +385,9 @@ Both commands index the codebase into a ranked outline (files, classes,
 functions, line numbers). See it with `agent --map "query"` or /map in either
 REPL. Cached in .agent-cache/ (add it to .gitignore). AGENT_MAP=0 disables it,
 AGENT_MAP_CHARS (default 4000) sets its size.
+
+Kotlin, Swift and Java are parsed with tree-sitter when the optional grammars are
+installed (`pip install ".[treesitter]"`), which gives exact classes, methods,
+constructors and fields; without them a regex fallback is used, which can mistake
+calls or enum constants for definitions. Installing or removing a grammar
+re-indexes the cache automatically.

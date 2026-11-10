@@ -359,6 +359,112 @@ def _swift_refs(source: str) -> Set[str]:
     return refs
 
 
+# ---- Tree-sitter Java extraction ----------------------------------------------
+
+try:
+    import tree_sitter_java as _tsjava
+    _JAVA_LANG = _ts.Language(_tsjava.language())
+    _java_parser = _ts.Parser(_JAVA_LANG)
+except (ImportError, NameError):
+    _java_parser = None
+
+_JAVA_TYPE_DECLS = frozenset({
+    "class_declaration", "interface_declaration", "enum_declaration",
+    "record_declaration", "annotation_type_declaration",
+})
+_JAVA_BODY_TYPES = frozenset({
+    "class_body", "interface_body", "enum_body", "annotation_type_body",
+    "enum_body_declarations",  # members after the enum constants
+})
+_JAVA_CALLABLE_DECLS = frozenset({
+    "method_declaration", "constructor_declaration", "compact_constructor_declaration",
+    "annotation_type_element_declaration",
+})
+
+
+def _java_signature(node, source_bytes: bytes) -> str:
+    """One-line signature: the declaration up to its body (or initializer)."""
+    end = node.end_byte
+    for child in node.children:
+        if child.type in _JAVA_BODY_TYPES | {"block", "constructor_body"}:
+            end = child.start_byte
+            break
+    sig = source_bytes[node.start_byte:end].decode(errors="replace")
+    if node.type == "field_declaration":
+        sig = sig.split("=", 1)[0]
+    return " ".join(sig.split()).rstrip(";").strip()[:200]
+
+
+def _java_defs(source: str) -> List[list]:
+    """Extract definitions from Java source via tree-sitter.
+
+    Types (class/interface/enum/record/@interface) are "class"; methods,
+    constructors and fields are "def" (as for Kotlin and Swift). Constant
+    fields (ALL_CAPS) are skipped. Falls back to regex without the grammar.
+    """
+    if _java_parser is None:
+        return _regex_defs(source, ".java")
+    src = source.encode()
+    tree = _java_parser.parse(src)
+    defs: List[list] = []
+
+    def name_of(node) -> Optional[str]:
+        n = node.child_by_field_name("name")
+        return n.text.decode() if n is not None else None
+
+    def visit(node, depth: int):
+        for child in node.children:
+            t = child.type
+            if t in _JAVA_TYPE_DECLS:
+                name = name_of(child)
+                if name:
+                    defs.append([child.start_point.row + 1, depth, "class", name,
+                                 _java_signature(child, src)])
+                for sub in child.children:
+                    if sub.type in _JAVA_BODY_TYPES:
+                        visit(sub, depth + 1)
+            elif t == "enum_body_declarations":
+                visit(child, depth)
+            elif t in _JAVA_CALLABLE_DECLS:
+                name = name_of(child)
+                if name:
+                    defs.append([child.start_point.row + 1, depth, "def", name,
+                                 _java_signature(child, src)])
+            elif t in ("field_declaration", "constant_declaration"):
+                sig = _java_signature(child, src)
+                for sub in child.children:
+                    if sub.type == "variable_declarator":
+                        name = name_of(sub)
+                        if name and not name.isupper():
+                            defs.append([child.start_point.row + 1, depth, "def", name, sig])
+
+    visit(tree.root_node, 0)
+    return defs
+
+
+def _java_refs(source: str) -> Set[str]:
+    """Extract referenced identifiers and type names from Java source via
+    tree-sitter. Import paths contribute every segment, including the class."""
+    if _java_parser is None:
+        return _extract_refs(source, ".java")
+    tree = _java_parser.parse(source.encode())
+    refs: Set[str] = set()
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        if node.type in ("identifier", "type_identifier") and node.child_count == 0:
+            refs.add(node.text.decode())
+        stack.extend(node.children)
+    return refs
+
+
+def _parser_tag() -> List[str]:
+    """Which tree-sitter grammars are active. Stored in the cache so that
+    installing or removing one re-indexes files parsed the other way."""
+    return [name for name, parser in (("kotlin", _kt_parser), ("swift", _swift_parser),
+                                      ("java", _java_parser)) if parser is not None]
+
+
 # Patterns for extracting references (imports, type usage) from non-Python files
 _IMPORT_PATTERNS = {
     ".kt": re.compile(r'^\s*import\s+[\w.]+\.(\w+)', re.MULTILINE),
@@ -430,6 +536,9 @@ def extract(path: Path) -> Optional[dict]:
     elif ext == ".swift":
         defs = _swift_defs(source)
         refs = sorted(_swift_refs(source))
+    elif ext == ".java":
+        defs = _java_defs(source)
+        refs = sorted(_java_refs(source))
     elif ext == ".py":
         defs = _python_defs(source)
         refs = sorted(_python_refs(source))
@@ -495,7 +604,7 @@ class RepoMap:
         cache = {}
         try:
             data = json.loads(self.cache_path.read_text(encoding="utf-8"))
-            if data.get("version") == CACHE_VERSION:
+            if data.get("version") == CACHE_VERSION and data.get("parsers", []) == _parser_tag():
                 cache = data["files"]
         except (OSError, ValueError, KeyError):
             pass
@@ -530,7 +639,8 @@ class RepoMap:
             ignore = self.cache_path.parent / ".gitignore"
             if not ignore.exists():
                 ignore.write_text("*\n", encoding="utf-8")
-            self.cache_path.write_text(json.dumps({"version": CACHE_VERSION, "files": files}), encoding="utf-8")
+            self.cache_path.write_text(json.dumps({"version": CACHE_VERSION, "parsers": _parser_tag(),
+                                                   "files": files}), encoding="utf-8")
         except OSError:
             pass
 
