@@ -392,14 +392,30 @@ constructors and fields; without them a regex fallback is used, which can mistak
 calls or enum constants for definitions. Installing or removing a grammar
 re-indexes the cache automatically.
 
-## Code graph (`agent graph`, Kotlin / Android)
+## Code graph (`agent graph`, Kotlin / Android, Swift / iOS)
 
 A resolved graph of a Kotlin Android project: classes, functions, properties,
 Gradle modules and resources, linked by `contains`, `imports`, `calls`,
 `inherits`, `injects` (@Inject constructors/fields, `by viewModels()`/`inject()`),
 `uses_type`, `overrides`, `depends_on` (Gradle `project(...)`) and `references`
 (`R.layout`/`R.id`/... and ViewBinding classes → res XML; layouts and the manifest
-→ classes). Pure Python: its own Kotlin tokenizer/parser, no tree-sitter.
+→ classes). Pure Python: its own Kotlin and Swift tokenizers/parsers, no tree-sitter.
+
+Swift / iOS works the same way. Modules come from Xcode targets
+(`project.pbxproj`, including Xcode 16 synchronized folders) and `Package.swift`
+targets, with `depends_on` from target dependencies and package products; without
+either, the whole project is one module. `extension Foo` adds members and
+conformances to `Foo` (extensions of `String`, `UIView`, … behave like extension
+functions), overloads are told apart by argument labels (`select(_:)` vs
+`select(id:)` — ids carry them), and methods that implement a protocol requirement
+get an inferred `overrides`, so `callers` follows calls made through the protocol.
+`injects` covers `@EnvironmentObject`/`@StateObject`/`@ObservedObject`,
+Factory/Resolver `@Injected`/`@Inject` and Swinject's `resolve(Foo.self)`.
+`references` links `UIImage(named:)`, `Image(_:)`, `UIColor(named:)`,
+`NSLocalizedString`, `Text("key")`, storyboard ids and R.swift to asset-catalog
+entries, `.strings`/`.xcstrings` keys and storyboards; storyboards/xibs link to their
+`customClass` classes and `@IBAction`s, and Info.plist to `$(PRODUCT_MODULE_NAME).X`
+classes. Pods, Carthage, DerivedData and `.build` are skipped.
 
     agent graph build [--force]          # index + stats (load time, cache size, call-resolution rate)
     agent graph callers UserRepository.load
@@ -408,6 +424,7 @@ Gradle modules and resources, linked by `contains`, `imports`, `calls`,
     agent graph explain UserRepository
     agent graph impact core/data/src/main/java/com/example/data/UserRepository.kt
     agent graph query "user cache"
+    agent graph callers "UserListViewModel.select(_:)"   # Swift: labels pick an overload
 
 Symbols can be full ids, `Class.member` or bare names. Output is plain text with
 `path:line` and is capped by `--budget` (default 4000 chars, `AGENT_GRAPH_CHARS`).
@@ -420,6 +437,6 @@ unresolved rather than guessed.
 Per-file parse results are cached in `.agent-cache/codegraph.json`, re-parsed by
 mtime/size; the graph itself is resolved in memory on each load (about 0.1 s
 for ~700 files). Storage sits behind `graph.store.FactStore`, so it can be swapped
-for SQLite. On Kotlin repos the repo map is ranked with PageRank over the graph's
+for SQLite. On Kotlin and Swift repos the repo map is ranked with PageRank over the graph's
 call/inherit/inject edges (files without such edges keep the identifier-based
 ranking); `AGENT_GRAPH_RANK=0` turns that off.

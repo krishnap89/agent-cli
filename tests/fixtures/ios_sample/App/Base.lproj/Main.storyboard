@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document type="com.apple.InterfaceBuilder3.CocoaTouch.Storyboard.XIB" version="3.0" toolsVersion="21701" targetRuntime="iOS.CocoaTouch" initialViewController="Lgn-01-abc">
+    <scenes>
+        <scene sceneID="s1">
+            <objects>
+                <viewController storyboardIdentifier="Login" id="Lgn-01-abc" customClass="LoginViewController" customModule="App" customModuleProvider="target" sceneMemberID="viewController">
+                    <view key="view" contentMode="scaleToFill" id="v1">
+                        <subviews>
+                            <button opaque="NO" id="b1">
+                                <connections>
+                                    <action selector="loginTapped:" destination="Lgn-01-abc" eventType="touchUpInside" id="a1"/>
+                                </connections>
+                            </button>
+                        </subviews>
+                    </view>
+                    <connections>
+                        <outlet property="loginButton" destination="b1" id="o1"/>
+                    </connections>
+                </viewController>
+            </objects>
+        </scene>
+        <scene sceneID="s2">
+            <objects>
+                <viewController storyboardIdentifier="Home" id="Hom-02-def" customClass="HomeViewController" customModule="App" sceneMemberID="viewController"/>
+                <!-- <viewController storyboardIdentifier="Ghost" customClass="GhostViewController"/> -->
+            </objects>
+        </scene>
+    </scenes>
+</document>

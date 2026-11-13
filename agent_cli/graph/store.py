@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Dict
 
 # Bump when the facts format or a parser changes, to force a full re-parse.
-FACTS_VERSION = 1
+FACTS_VERSION = 2
 
 
 class FactStore:

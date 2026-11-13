@@ -11,8 +11,15 @@ EDGE_KINDS = (CONTAINS, IMPORTS, CALLS, INHERITS, INJECTS, USES_TYPE, OVERRIDES,
 # Provenance
 EXTRACTED, INFERRED, AMBIGUOUS = "extracted", "inferred", "ambiguous"
 
-CLASS_KINDS = frozenset({"class", "interface", "object", "enum", "annotation", "typealias"})
+CLASS_KINDS = frozenset({"class", "interface", "object", "enum", "annotation", "typealias",
+                         "struct", "protocol", "actor"})
 CODE_KINDS = frozenset({"function", "constructor", "property"})
+
+
+def _plain(nid: str) -> str:
+    """'App.Foo.load(id:)#12' -> 'App.Foo.load'."""
+    nid = nid.split("#", 1)[0]
+    return nid[:nid.index("(")] if nid.endswith(")") and "(" in nid else nid
 
 
 class Node:
@@ -143,10 +150,11 @@ class CodeGraph:
             return [q]
         if "file:" + q in self.nodes:
             return ["file:" + q]
-        # Class.member or pkg-suffix match
+        # Class.member or pkg-suffix match (Swift ids carry labels: load(id:))
         if "." in q or "/" in q:
             hits = [nid for nid in self.nodes
-                    if nid.endswith("." + q) or nid.split("#", 1)[0].endswith("." + q)]
+                    if nid.endswith("." + q) or _plain(nid).endswith("." + q)
+                    or nid.split("#", 1)[0].endswith("." + q)]
             if hits:
                 return sorted(hits)
             fhits = [nid for nid in self.nodes if nid.startswith("file:") and nid.endswith("/" + q)]

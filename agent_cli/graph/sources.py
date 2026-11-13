@@ -1,5 +1,6 @@
 """Which files the code graph reads, and per-file fact extraction for the
-non-Kotlin ones (Gradle build scripts, Android resource XML, manifests).
+non-source ones (Gradle build scripts, Android resource XML, manifests; the
+iOS project files are in ios_sources).
 
 Every extractor returns a JSON-serializable dict with a "lang" key:
   kotlin    see kotlin_parser.parse_kotlin
@@ -9,6 +10,8 @@ Every extractor returns a JSON-serializable dict with a "lang" key:
              "ids": [[name, line]], "values": [[type, name, line]],
              "classes": [[class_name, line]]}
   manifest  {"package": str, "classes": [[class_name, line]]}
+  swift     see swift_parser.parse_swift
+  spm, xcodeproj, ib, strings, xcstrings, xcasset, plist   see ios_sources
 """
 import os
 import re
@@ -17,8 +20,15 @@ from pathlib import Path
 from typing import List, Optional
 
 from ..repomap import MAX_FILE_BYTES, SKIP_DIRS
+from . import ios_sources
 from .kotlin_parser import parse_kotlin
+from .swift_parser import parse_swift
 
+# Third-party / generated trees on top of the repo map's SKIP_DIRS.
+GRAPH_SKIP_DIRS = SKIP_DIRS | {"Pods", "Carthage", "DerivedData", ".build", ".swiftpm",
+                                "SourcePackages", "xcuserdata", "checkouts"}
+# project.pbxproj files of big apps are often several MB.
+MAX_BYTES = {"xcodeproj": 8_000_000, "xcstrings": 4_000_000}
 GRADLE_NAMES = frozenset({"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"})
 # Resource folders whose files are resources themselves (R.layout.main -> layout/main.xml).
 FILE_RES_TYPES = frozenset({
@@ -37,13 +47,29 @@ def classify(rel: str) -> Optional[str]:
     """The extractor for a repo-relative path, or None to skip the file."""
     p = Path(rel)
     name = p.name
-    if any(part in SKIP_DIRS for part in p.parts[:-1]):
+    if any(part in GRAPH_SKIP_DIRS for part in p.parts[:-1]):
         return None
     if name in GRADLE_NAMES:
         return "gradle"
     suffix = p.suffix.lower()
     if suffix == ".kt":
         return "kotlin"
+    if name == "Package.swift":
+        return "spm"
+    if suffix == ".swift":
+        return "swift"
+    if name == "project.pbxproj":
+        return "xcodeproj"
+    if suffix in (".storyboard", ".xib"):
+        return "ib"
+    if suffix == ".strings":
+        return "strings"
+    if suffix == ".xcstrings":
+        return "xcstrings"
+    if name == "Contents.json" and ios_sources.asset_kind(rel):
+        return "xcasset"
+    if name == "Info.plist":
+        return "plist"
     if suffix == ".xml":
         if name == "AndroidManifest.xml":
             return "manifest"
@@ -66,7 +92,7 @@ def list_sources(root: Path) -> List[str]:
         pass
     found = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+        dirnames[:] = [d for d in dirnames if d not in GRAPH_SKIP_DIRS and not d.startswith(".")]
         for name in filenames:
             rel = os.path.relpath(os.path.join(dirpath, name), root).replace(os.sep, "/")
             if classify(rel):
@@ -79,7 +105,7 @@ def extract(root: Path, rel: str) -> Optional[dict]:
     lang = classify(rel)
     path = root / rel
     try:
-        if lang is None or path.stat().st_size > MAX_FILE_BYTES:
+        if lang is None or path.stat().st_size > MAX_BYTES.get(lang, MAX_FILE_BYTES):
             return None
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -90,8 +116,25 @@ def extract(root: Path, rel: str) -> Optional[dict]:
         facts = parse_gradle(text, settings=rel.rsplit("/", 1)[-1].startswith("settings."))
     elif lang == "manifest":
         facts = parse_manifest(text)
-    else:
+    elif lang == "res":
         facts = parse_res_xml(text, rel)
+    elif lang == "swift":
+        facts = parse_swift(text)
+    elif lang == "spm":
+        facts = ios_sources.parse_package_swift(text)
+    elif lang == "xcodeproj":
+        facts = ios_sources.parse_pbxproj(text, rel)
+    elif lang == "ib":
+        facts = ios_sources.parse_ib(text, rel)
+    elif lang == "strings":
+        facts = ios_sources.parse_strings(text)
+    elif lang == "xcstrings":
+        facts = ios_sources.parse_xcstrings(text)
+    elif lang == "xcasset":
+        kind_name = ios_sources.asset_kind(rel)
+        facts = {"rtype": kind_name[0], "rname": kind_name[1]} if kind_name else {}
+    else:
+        facts = ios_sources.parse_info_plist(text)
     facts["lang"] = lang
     return facts
 

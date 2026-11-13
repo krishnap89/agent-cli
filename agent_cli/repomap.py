@@ -8,7 +8,7 @@ How it works
    Results are cached in .agent-cache/ and only changed files are re-parsed.
 3. Build a file→file dependency graph: an edge from A→B means A references a
    symbol defined in B.  Run iterative PageRank on this graph so files that
-   are depended on by many important files bubble up.  For Kotlin projects
+   are depended on by many important files bubble up.  For Kotlin and Swift projects
    the precise code graph (agent_cli.graph: resolved call / inherit / inject
    edges) replaces those identifier edges for every file it has edges for;
    other files, or any failure, keep the identifier-based ranking.
@@ -721,11 +721,12 @@ class RepoMap:
         self._graph_rank(all_files)
 
     def _graph_rank(self, all_files: List[str]) -> None:
-        """Re-rank with PageRank over the Kotlin code graph's call/inherit/
-        inject edges. Keeps the identifier-based ranks if there is no Kotlin,
+        """Re-rank with PageRank over the Kotlin/Swift code graph's call/inherit/
+        inject edges. Keeps the identifier-based ranks if there is no Kotlin/Swift,
         the graph has no cross-file edges, it is disabled (AGENT_GRAPH_RANK=0)
         or anything goes wrong."""
-        if os.getenv("AGENT_GRAPH_RANK", "1") == "0" or not any(f.endswith(".kt") for f in all_files):
+        if os.getenv("AGENT_GRAPH_RANK", "1") == "0" or \
+                not any(f.endswith((".kt", ".swift")) for f in all_files):
             return
         try:
             from .graph.rank import graph_file_ranks

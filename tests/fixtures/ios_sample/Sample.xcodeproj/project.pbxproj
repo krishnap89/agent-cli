@@ -1,0 +1,303 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 60;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		B00000000000000000000001 /* SampleApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000001 /* SampleApp.swift */; };
+		B00000000000000000000002 /* Container.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000002 /* Container.swift */; };
+		B00000000000000000000003 /* UserListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000003 /* UserListViewModel.swift */; };
+		B00000000000000000000004 /* UserListView.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000004 /* UserListView.swift */; };
+		B00000000000000000000005 /* LoginViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000005 /* LoginViewController.swift */; };
+		B00000000000000000000006 /* HomeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000006 /* HomeViewController.swift */; };
+		B00000000000000000000007 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000007 /* SceneDelegate.swift */; };
+		B00000000000000000000008 /* EdgeCases.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000008 /* EdgeCases.swift */; };
+		B00000000000000000000009 /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = V00000000000000000000001 /* Main.storyboard */; };
+		B00000000000000000000010 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000010 /* Assets.xcassets */; };
+		B00000000000000000000011 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = V00000000000000000000002 /* Localizable.strings */; };
+		B00000000000000000000013 /* UserListViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F00000000000000000000013 /* UserListViewModelTests.swift */; };
+		B00000000000000000000014 /* CoreKit in Frameworks */ = {isa = PBXBuildFile; productRef = X00000000000000000000001 /* CoreKit */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		C00000000000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = R00000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = T00000000000000000000001;
+			remoteInfo = App;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		F00000000000000000000001 /* SampleApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SampleApp.swift; sourceTree = "<group>"; };
+		F00000000000000000000002 /* Container.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Container.swift; sourceTree = "<group>"; };
+		F00000000000000000000003 /* UserListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserListViewModel.swift; sourceTree = "<group>"; };
+		F00000000000000000000004 /* UserListView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserListView.swift; sourceTree = "<group>"; };
+		F00000000000000000000005 /* LoginViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoginViewController.swift; sourceTree = "<group>"; };
+		F00000000000000000000006 /* HomeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HomeViewController.swift; sourceTree = "<group>"; };
+		F00000000000000000000007 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SceneDelegate.swift; sourceTree = "<group>"; };
+		F00000000000000000000008 /* EdgeCases.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EdgeCases.swift; sourceTree = "<group>"; };
+		F00000000000000000000009 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/Main.storyboard; sourceTree = "<group>"; };
+		F00000000000000000000010 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		F00000000000000000000011 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
+		F00000000000000000000012 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		F00000000000000000000013 /* UserListViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UserListViewModelTests.swift; sourceTree = "<group>"; };
+		F00000000000000000000014 /* App.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = App.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		F00000000000000000000015 /* AppTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AppTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		F00000000000000000000016 /* CoreKit */ = {isa = PBXFileReference; lastKnownFileType = wrapper; path = Packages/CoreKit; sourceTree = SOURCE_ROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		P00000000000000000000004 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000014 /* CoreKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		G00000000000000000000000 = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000016 /* CoreKit */,
+				G00000000000000000000001 /* App */,
+				G00000000000000000000002 /* AppTests */,
+				G00000000000000000000003 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		G00000000000000000000001 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000001 /* SampleApp.swift */,
+				F00000000000000000000002 /* Container.swift */,
+				F00000000000000000000003 /* UserListViewModel.swift */,
+				F00000000000000000000004 /* UserListView.swift */,
+				F00000000000000000000005 /* LoginViewController.swift */,
+				F00000000000000000000006 /* HomeViewController.swift */,
+				F00000000000000000000007 /* SceneDelegate.swift */,
+				F00000000000000000000008 /* EdgeCases.swift */,
+				V00000000000000000000001 /* Main.storyboard */,
+				F00000000000000000000010 /* Assets.xcassets */,
+				V00000000000000000000002 /* Localizable.strings */,
+				F00000000000000000000012 /* Info.plist */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		G00000000000000000000002 /* AppTests */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000013 /* UserListViewModelTests.swift */,
+			);
+			path = AppTests;
+			sourceTree = "<group>";
+		};
+		G00000000000000000000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				F00000000000000000000014 /* App.app */,
+				F00000000000000000000015 /* AppTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		T00000000000000000000001 /* App */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = L00000000000000000000001 /* Build configuration list for PBXNativeTarget "App" */;
+			buildPhases = (
+				P00000000000000000000001 /* Sources */,
+				P00000000000000000000004 /* Frameworks */,
+				P00000000000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = App;
+			packageProductDependencies = (
+				X00000000000000000000001 /* CoreKit */,
+			);
+			productName = App;
+			productReference = F00000000000000000000014 /* App.app */;
+			productType = "com.apple.product-type.application";
+		};
+		T00000000000000000000002 /* AppTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = L00000000000000000000002 /* Build configuration list for PBXNativeTarget "AppTests" */;
+			buildPhases = (
+				P00000000000000000000003 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				D00000000000000000000001 /* PBXTargetDependency */,
+			);
+			name = AppTests;
+			productName = AppTests;
+			productReference = F00000000000000000000015 /* AppTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		R00000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1500;
+			};
+			buildConfigurationList = L00000000000000000000003 /* Build configuration list for PBXProject "Sample" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = G00000000000000000000000;
+			packageReferences = (
+				K00000000000000000000001 /* XCLocalSwiftPackageReference "Packages/CoreKit" */,
+			);
+			productRefGroup = G00000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				T00000000000000000000001 /* App */,
+				T00000000000000000000002 /* AppTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		P00000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000009 /* Main.storyboard in Resources */,
+				B00000000000000000000010 /* Assets.xcassets in Resources */,
+				B00000000000000000000011 /* Localizable.strings in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		P00000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000001 /* SampleApp.swift in Sources */,
+				B00000000000000000000002 /* Container.swift in Sources */,
+				B00000000000000000000003 /* UserListViewModel.swift in Sources */,
+				B00000000000000000000004 /* UserListView.swift in Sources */,
+				B00000000000000000000005 /* LoginViewController.swift in Sources */,
+				B00000000000000000000006 /* HomeViewController.swift in Sources */,
+				B00000000000000000000007 /* SceneDelegate.swift in Sources */,
+				B00000000000000000000008 /* EdgeCases.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		P00000000000000000000003 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B00000000000000000000013 /* UserListViewModelTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		D00000000000000000000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = T00000000000000000000001 /* App */;
+			targetProxy = C00000000000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXVariantGroup section */
+		V00000000000000000000001 /* Main.storyboard */ = {
+			isa = PBXVariantGroup;
+			children = (
+				F00000000000000000000009 /* Base */,
+			);
+			name = Main.storyboard;
+			sourceTree = "<group>";
+		};
+		V00000000000000000000002 /* Localizable.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				F00000000000000000000011 /* en */,
+			);
+			name = Localizable.strings;
+			sourceTree = "<group>";
+		};
+/* End PBXVariantGroup section */
+
+/* Begin XCBuildConfiguration section */
+		E00000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				INFOPLIST_FILE = App/Info.plist;
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.app;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		L00000000000000000000001 /* Build configuration list for PBXNativeTarget "App" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E00000000000000000000001 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		L00000000000000000000002 /* Build configuration list for PBXNativeTarget "AppTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E00000000000000000000001 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		L00000000000000000000003 /* Build configuration list for PBXProject "Sample" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E00000000000000000000001 /* Debug */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		K00000000000000000000001 /* XCLocalSwiftPackageReference "Packages/CoreKit" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/CoreKit;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		X00000000000000000000001 /* CoreKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = CoreKit;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = R00000000000000000000001 /* Project object */;
+}

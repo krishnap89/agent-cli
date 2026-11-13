@@ -99,8 +99,8 @@ def _match_table(toks: List[Token]) -> Dict[int, int]:
 
 
 class _Parser:
-    def __init__(self, source: str):
-        self.t = tokenize(source)
+    def __init__(self, source: str, tokens: Optional[List[Token]] = None):
+        self.t = tokens if tokens is not None else tokenize(source)
         self.n = len(self.t)
         self.p = 0
         self.match = _match_table(self.t)
@@ -770,7 +770,7 @@ class _Parser:
         j -= 1
         while j >= 0 and len(segs) < 8:
             kind, s, _, _ = self.t[j]
-            if s == "!!":
+            if s in ("!!", "!"):  # Kotlin x!!.y, Swift x!.y
                 j -= 1
                 continue
             if s == ")":
@@ -861,8 +861,9 @@ class _Parser:
                 "brefs": self.brefs}
 
 
-_SPACE_AFTER = frozenset({",", "->", "suspend", "out", "in"})
-_SPACE_BEFORE = frozenset({"->"})
+_SPACE_AFTER = frozenset({",", "->", "suspend", "out", "in", ":", "&", "some", "any", "inout",
+                          "borrowing", "consuming", "sending", "async", "throws", "rethrows"})
+_SPACE_BEFORE = frozenset({"->", "&", "async", "throws", "rethrows"})
 
 
 def _join(toks: List[Token]) -> str:
@@ -877,7 +878,8 @@ def _join(toks: List[Token]) -> str:
 
 def _head(type_text: str) -> str:
     """'List<User>?' -> 'List'; 'a.b.Foo<T>' -> 'a.b.Foo'; '(A) -> B' -> ''."""
-    m = re.match(r"\s*(?:suspend\s+)?([A-Za-z_][\w.]*)", type_text)
+    m = re.match(r"\s*(?:(?:suspend|some|any|inout|borrowing|consuming|sending)\s+|@\w+\s+)*"
+                 r"([A-Za-z_][\w.]*)", type_text)
     return m.group(1) if m else ""
 
 

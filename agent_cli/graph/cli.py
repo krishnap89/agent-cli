@@ -1,4 +1,4 @@
-"""`agent graph <command>`: build and query the Kotlin/Android code graph.
+"""`agent graph <command>`: build and query the Kotlin/Android + Swift/iOS code graph.
 
   agent graph build [--force]            index (incremental) and print stats
   agent graph callers <symbol>           who calls it
@@ -8,8 +8,8 @@
   agent graph impact <file>...           what may break if these files change
   agent graph query "<text>"             ranked symbol search
 
-Symbols are full ids (com.x.UserRepository.load), suffixes (UserRepository.load)
-or simple names (load). Output is plain text capped by --budget characters.
+Symbols are full ids (com.x.UserRepository.load, App.Repo.load(id:)), suffixes
+(UserRepository.load, Repo.load(id:)) or simple names (load). Output is plain text capped by --budget characters.
 """
 import argparse
 import os
@@ -28,7 +28,7 @@ def _parser() -> argparse.ArgumentParser:
     common.add_argument("--budget", "-b", type=int,
                         default=int(os.getenv("AGENT_GRAPH_CHARS", str(queries.DEFAULT_BUDGET))),
                         help="max output characters (default 4000, AGENT_GRAPH_CHARS)")
-    p = argparse.ArgumentParser(prog="agent graph", description="Kotlin/Android code graph.",
+    p = argparse.ArgumentParser(prog="agent graph", description="Kotlin/Android and Swift/iOS code graph.",
                                 parents=[common])
     sub = p.add_subparsers(dest="cmd", metavar="<command>")
     b = sub.add_parser("build", parents=[common], help="index and print stats")

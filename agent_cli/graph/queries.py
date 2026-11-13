@@ -18,7 +18,9 @@ DEFAULT_BUDGET = 4000
 PATH_KINDS = (CALLS, INJECTS, INHERITS, OVERRIDES, USES_TYPE, REFERENCES)
 # Edge kinds along which a change propagates to the edge's source.
 IMPACT_KINDS = (CALLS, INHERITS, INJECTS, USES_TYPE, OVERRIDES, REFERENCES, IMPORTS, DEPENDS_ON)
-_TEST_RE = re.compile(r"(^|/)(test|androidTest|testDebug|testRelease)/|Test\.kt$|Tests\.kt$")
+_TEST_RE = re.compile(
+    r"(^|/)(test|tests|androidTest|testDebug|testRelease|\w+Tests|\w+UITests)/"
+    r"|Tests?\.(kt|swift)$|Spec\.(kt|swift)$")
 
 
 class _Out:
@@ -94,8 +96,10 @@ def callers(g: CodeGraph, symbol: str, budget: int = DEFAULT_BUDGET) -> str:
         _many(g, ids, out)
     for nid in ids:
         edges = [e for t in _group_targets(g, nid) for e in g.in_edges(t, (CALLS,))]
-        # Also show callers that reach this member through an override.
+        # Calls that may dispatch here: to members overriding this one, and
+        # through the base member / protocol requirement this one implements.
         via = [e for o in g.in_edges(nid, (OVERRIDES,)) for e in g.in_edges(o.src, (CALLS,))]
+        via += [e for o in g.out_edges(nid, (OVERRIDES,)) for e in g.in_edges(o.dst, (CALLS,))]
         out.add(f"callers of {_label(g, nid)}: {len(edges)}" + (f" (+{len(via)} via overrides)" if via else ""))
         for e in sorted(edges, key=lambda e: (-e.conf, e.file, e.line)):
             out.add(_edge_line(g, e, e.src))
@@ -118,6 +122,8 @@ def callees(g: CodeGraph, symbol: str, budget: int = DEFAULT_BUDGET) -> str:
         sources = [nid]
         if n.kind in CLASS_KINDS:  # a class's callees are those of its members
             sources += g.descendants(nid)
+        elif n.kind == "file":
+            sources += g.by_file.get(n.file, [])
         edges = [e for s in sources for e in g.out_edges(s, (CALLS,))]
         out.add(f"callees of {_label(g, nid)}: {len(edges)}")
         for e in sorted(edges, key=lambda e: (e.file, e.line)):
@@ -143,6 +149,7 @@ def find_path(g: CodeGraph, src: str, dst: str, max_depth: int = 6,
         depth[s] = 0
         q.append(s)
     ks = set(kinds)
+    nodes = g.nodes
     while q:
         cur = q.popleft()
         if cur in goal and cur not in start:
@@ -154,8 +161,10 @@ def find_path(g: CodeGraph, src: str, dst: str, max_depth: int = 6,
             return list(reversed(path))
         if depth[cur] >= max_depth:
             continue
+        into_members = nodes[cur].kind in CLASS_KINDS if cur in nodes else False
         for e in g.out.get(cur, ()):
-            if e.kind not in ks or e.dst in prev:
+            # reaching a class makes its members reachable (one contains hop)
+            if (e.kind not in ks and not (into_members and e.kind == CONTAINS)) or e.dst in prev:
                 continue
             prev[e.dst] = e
             depth[e.dst] = depth[cur] + 1
@@ -314,6 +323,14 @@ def impact(g: CodeGraph, files: Iterable[str], depth: int = 3,
     ks = set(IMPACT_KINDS)
     while q:
         cur = q.popleft()
+        # a changed member changes its enclosing class (same distance), so
+        # whatever references the class (a storyboard, a manifest) is reached
+        parent = g.nodes[cur].parent if cur in g.nodes else None
+        if parent and parent not in dist:
+            dist[parent] = dist[cur]
+            if cur in why:
+                why[parent] = why[cur]
+            q.appendleft(parent)
         if dist[cur] >= depth:
             continue
         for e in g.inc.get(cur, ()):
