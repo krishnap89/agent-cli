@@ -8,7 +8,10 @@ How it works
    Results are cached in .agent-cache/ and only changed files are re-parsed.
 3. Build a file→file dependency graph: an edge from A→B means A references a
    symbol defined in B.  Run iterative PageRank on this graph so files that
-   are depended on by many important files bubble up.
+   are depended on by many important files bubble up.  For Kotlin projects
+   the precise code graph (agent_cli.graph: resolved call / inherit / inject
+   edges) replaces those identifier edges for every file it has edges for;
+   other files, or any failure, keep the identifier-based ranking.
 4. Render the top files and their top symbols until the character budget is
    used up, e.g.
 
@@ -575,6 +578,7 @@ class RepoMap:
         self._file_ranks: Dict[str, float] = {}
         self._edges: Dict[str, Dict[str, float]] = {}
         self._reverse_edges: Dict[str, List[Tuple[str, float]]] = {}
+        self.rank_source = "refs"  # or "graph" when the Kotlin code graph ranked files
 
     # -- indexing --
 
@@ -713,6 +717,25 @@ class RepoMap:
         self._file_ranks = ranks
         self._edges = dict(edges)
         self._reverse_edges = dict(reverse_edges)
+        self.rank_source = "refs"
+        self._graph_rank(all_files)
+
+    def _graph_rank(self, all_files: List[str]) -> None:
+        """Re-rank with PageRank over the Kotlin code graph's call/inherit/
+        inject edges. Keeps the identifier-based ranks if there is no Kotlin,
+        the graph has no cross-file edges, it is disabled (AGENT_GRAPH_RANK=0)
+        or anything goes wrong."""
+        if os.getenv("AGENT_GRAPH_RANK", "1") == "0" or not any(f.endswith(".kt") for f in all_files):
+            return
+        try:
+            from .graph.rank import graph_file_ranks
+            ranks = graph_file_ranks(self.root, all_files, self._edges,
+                                     cache_dir=self.cache_path.parent)
+        except Exception:  # never let the graph break the repo map
+            return
+        if ranks:
+            self._file_ranks = ranks
+            self.rank_source = "graph"
 
     # -- dependency query --
 

@@ -14,11 +14,21 @@ from .review import collect_material, build_review_messages, build_merge_message
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
 from .writing import handle as handle_writing
 
-app = typer.Typer(add_completion=False)
+cli = typer.Typer(add_completion=False)
 console = Console()
 
 
-@app.command()
+def app() -> None:
+    """Console entry point. `agent graph ...` goes to the code-graph CLI
+    (its own argparse subcommands); everything else is the typer app."""
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "graph":
+        from .graph.cli import run as run_graph
+        sys.exit(run_graph(sys.argv[2:]))
+    cli()
+
+
+@cli.command()
 def main(
     prompt: Optional[str] = typer.Argument(None, help="One-shot task. Omit for interactive mode."),
     yes: bool = typer.Option(False, "--yes", "-y", help="Auto-approve writes and commands."),

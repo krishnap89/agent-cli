@@ -391,3 +391,35 @@ installed (`pip install ".[treesitter]"`), which gives exact classes, methods,
 constructors and fields; without them a regex fallback is used, which can mistake
 calls or enum constants for definitions. Installing or removing a grammar
 re-indexes the cache automatically.
+
+## Code graph (`agent graph`, Kotlin / Android)
+
+A resolved graph of a Kotlin Android project: classes, functions, properties,
+Gradle modules and resources, linked by `contains`, `imports`, `calls`,
+`inherits`, `injects` (@Inject constructors/fields, `by viewModels()`/`inject()`),
+`uses_type`, `overrides`, `depends_on` (Gradle `project(...)`) and `references`
+(`R.layout`/`R.id`/... and ViewBinding classes → res XML; layouts and the manifest
+→ classes). Pure Python: its own Kotlin tokenizer/parser, no tree-sitter.
+
+    agent graph build [--force]          # index + stats (load time, cache size, call-resolution rate)
+    agent graph callers UserRepository.load
+    agent graph callees MainActivity.onCreate
+    agent graph path MainActivity UserCache [--max-depth 6] [--kinds calls,injects]
+    agent graph explain UserRepository
+    agent graph impact core/data/src/main/java/com/example/data/UserRepository.kt
+    agent graph query "user cache"
+
+Symbols can be full ids, `Class.member` or bare names. Output is plain text with
+`path:line` and is capped by `--budget` (default 4000 chars, `AGENT_GRAPH_CHARS`).
+Each edge says how it was found: `extracted` (scope, imports), `inferred` (via a
+receiver's declared type, or a unique project-wide name) or `ambiguous` (several
+candidates, all kept), with a confidence. When the receiver type is unknown, calls to
+names the standard library uses everywhere (`map`, `filter`, `getString`, ...) are left
+unresolved rather than guessed.
+
+Per-file parse results are cached in `.agent-cache/codegraph.json`, re-parsed by
+mtime/size; the graph itself is resolved in memory on each load (about 0.1 s
+for ~700 files). Storage sits behind `graph.store.FactStore`, so it can be swapped
+for SQLite. On Kotlin repos the repo map is ranked with PageRank over the graph's
+call/inherit/inject edges (files without such edges keep the identifier-based
+ranking); `AGENT_GRAPH_RANK=0` turns that off.
