@@ -445,6 +445,19 @@ class RepoMapRankingTest(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class PackageQualifiedCallTest(unittest.TestCase):
+    def test_fully_qualified_top_level_function(self):
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            (tmp / "Util.kt").write_text("package com.x.util\nfun helper() {}\n")
+            (tmp / "App.kt").write_text("package com.y\nfun main() { com.x.util.helper() }\n")
+            g, _ = load_graph(tmp, store=MemoryFactStore())
+            es = [e for e in g.out_edges("com.y.main", ("calls",))]
+            self.assertEqual([(e.dst, e.prov) for e in es], [("com.x.util.helper", EXTRACTED)])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class PerformanceSmokeTest(unittest.TestCase):
     def test_large_generated_project_builds_quickly(self):
         tmp = Path(tempfile.mkdtemp())

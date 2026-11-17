@@ -20,7 +20,8 @@ PATH_KINDS = (CALLS, INJECTS, INHERITS, OVERRIDES, USES_TYPE, REFERENCES)
 IMPACT_KINDS = (CALLS, INHERITS, INJECTS, USES_TYPE, OVERRIDES, REFERENCES, IMPORTS, DEPENDS_ON)
 _TEST_RE = re.compile(
     r"(^|/)(test|tests|androidTest|testDebug|testRelease|\w+Tests|\w+UITests)/"
-    r"|Tests?\.(kt|swift)$|Spec\.(kt|swift)$")
+    r"|Tests?\.(kt|swift)$|Spec\.(kt|swift)$"
+    r"|(^|/)__tests__/|\.(test|spec)\.[cm]?[jt]sx?$")
 
 
 class _Out:

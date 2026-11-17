@@ -392,7 +392,7 @@ constructors and fields; without them a regex fallback is used, which can mistak
 calls or enum constants for definitions. Installing or removing a grammar
 re-indexes the cache automatically.
 
-## Code graph (`agent graph`, Kotlin / Android, Swift / iOS)
+## Code graph (`agent graph`, Kotlin / Android, Swift / iOS, TypeScript / JavaScript)
 
 A resolved graph of a Kotlin Android project: classes, functions, properties,
 Gradle modules and resources, linked by `contains`, `imports`, `calls`,
@@ -417,6 +417,32 @@ entries, `.strings`/`.xcstrings` keys and storyboards; storyboards/xibs link to 
 `customClass` classes and `@IBAction`s, and Info.plist to `$(PRODUCT_MODULE_NAME).X`
 classes. Pods, Carthage, DerivedData and `.build` are skipped.
 
+TypeScript and JavaScript (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.d.ts`)
+work the same way, JSX included. Every file is its own namespace, so ids start with
+its path without the extension (`src/api/user.UserApi.load`), and imports are
+resolved the way the compiler does it: relative paths (a `./x.js` import also finds
+`x.ts`), tsconfig/jsconfig `paths` and `baseUrl` (with comments, trailing commas and
+`extends` handled), and workspace packages by their `package.json` name. For those,
+`main`/`types`/`exports` paths that point at `dist/` or `lib/` are mapped back to
+`src/`. An import is then followed through barrel files (`export * from`,
+`export { a as b } from`, `export * as ns`), default exports and CommonJS
+(`require`, `module.exports = { … }`, `exports.x = …`) to the declaration it names.
+`import * as ns` makes `ns.fn()` and `ns.sub.fn()` resolvable. Workspace packages
+become modules, with `depends_on` taken from `dependencies` on each other.
+Besides classes, interfaces, enums, type aliases, namespaces and functions, the
+graph has arrow functions assigned to a `const` or a class field, object-literal
+modules (`export const api = { load() {…} }`) and top-level code (`<module>`, which
+covers Express routes and Jest `describe`/`it` bodies). `<UserCard … />` is a call of
+`UserCard`, and `onClick={handleClick}` is a reference to `handleClick`. A bare call
+never resolves to a class member (that takes `this.`), and a name that is neither
+local nor imported only matches globals declared in scripts such as `.d.ts` files.
+`injects` covers constructor parameters of `@Injectable`/`@Component`/`@Controller`/…
+classes (Angular, NestJS, InversifyJS, tsyringe) and Angular's `inject(Foo)`.
+Methods that implement an interface or redefine a base-class method get an
+inferred `overrides`, with or without the `override` keyword. `node_modules`,
+`dist`, `build`, `.next`, `.turbo` and other build outputs are skipped, as are
+`*.min.js` files. Vue and Svelte single-file components are not parsed.
+
     agent graph build [--force]          # index + stats (load time, cache size, call-resolution rate)
     agent graph callers UserRepository.load
     agent graph callees MainActivity.onCreate
@@ -425,6 +451,7 @@ classes. Pods, Carthage, DerivedData and `.build` are skipped.
     agent graph impact core/data/src/main/java/com/example/data/UserRepository.kt
     agent graph query "user cache"
     agent graph callers "UserListViewModel.select(_:)"   # Swift: labels pick an overload
+    agent graph impact packages/core/src/cache.ts        # TS: through barrels into other workspace packages
 
 Symbols can be full ids, `Class.member` or bare names. Output is plain text with
 `path:line` and is capped by `--budget` (default 4000 chars, `AGENT_GRAPH_CHARS`).
@@ -437,6 +464,6 @@ unresolved rather than guessed.
 Per-file parse results are cached in `.agent-cache/codegraph.json`, re-parsed by
 mtime/size; the graph itself is resolved in memory on each load (about 0.1 s
 for ~700 files). Storage sits behind `graph.store.FactStore`, so it can be swapped
-for SQLite. On Kotlin and Swift repos the repo map is ranked with PageRank over the graph's
+for SQLite. On Kotlin, Swift and TypeScript/JavaScript repos the repo map is ranked with PageRank over the graph's
 call/inherit/inject edges (files without such edges keep the identifier-based
 ranking); `AGENT_GRAPH_RANK=0` turns that off.

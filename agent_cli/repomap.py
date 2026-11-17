@@ -33,6 +33,8 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 CACHE_VERSION = 4
 MAX_FILE_BYTES = 500_000
+# Sources the code graph (agent_cli.graph) understands.
+_GRAPH_EXTS = (".kt", ".swift", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", "env",
     "dist", "build", "target", "out", "vendor", ".idea", ".vscode", ".agent-cache",
@@ -721,12 +723,12 @@ class RepoMap:
         self._graph_rank(all_files)
 
     def _graph_rank(self, all_files: List[str]) -> None:
-        """Re-rank with PageRank over the Kotlin/Swift code graph's call/inherit/
-        inject edges. Keeps the identifier-based ranks if there is no Kotlin/Swift,
-        the graph has no cross-file edges, it is disabled (AGENT_GRAPH_RANK=0)
-        or anything goes wrong."""
+        """Re-rank with PageRank over the Kotlin/Swift/TypeScript code graph's
+        call/inherit/inject edges. Keeps the identifier-based ranks if there is
+        no such source, the graph has no cross-file edges, it is disabled
+        (AGENT_GRAPH_RANK=0) or anything goes wrong."""
         if os.getenv("AGENT_GRAPH_RANK", "1") == "0" or \
-                not any(f.endswith((".kt", ".swift")) for f in all_files):
+                not any(f.endswith(_GRAPH_EXTS) for f in all_files):
             return
         try:
             from .graph.rank import graph_file_ranks
