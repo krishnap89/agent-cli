@@ -447,6 +447,71 @@ class TsCliAndRankTest(unittest.TestCase):
         self.assertGreater(r[CORE + "repo/UserRepository.ts"], r[WEB + "main.tsx"])
 
 
+class TsRepoMapExtractTest(unittest.TestCase):
+    """The repo map lists TS/JS definitions from the code graph's parser."""
+
+    def defs(self, rel):
+        from agent_cli.repomap import extract
+        info = extract(SAMPLE / rel)
+        return info, [(d[0], d[1], d[2], d[3]) for d in info["defs"]], {d[3]: d[4] for d in info["defs"]}
+
+    def test_components_objects_and_exports(self):
+        info, defs, sigs = self.defs(WEB + "components/UserCard.tsx")
+        self.assertEqual(defs, [(4, 0, "class", "Props"), (6, 0, "def", "UserCard")])
+        self.assertEqual(sigs["UserCard"], "export default function UserCard({…}: Props)")
+        self.assertFalse({"ghost", "ghostText", "panic"} & set(info["refs"]))  # comments / JSX text
+        self.assertIn("displayName", info["refs"])
+        _, defs, sigs = self.defs(WEB + "api.ts")
+        self.assertEqual(defs, [(3, 0, "def", "repository"), (5, 0, "class", "userApi"),
+                                (6, 1, "def", "fetchUser"), (9, 1, "def", "reset")])
+        self.assertEqual(sigs["repository"], "export const repository = new UserRepository(…)")
+
+    def test_classes_decorators_and_members(self):
+        _, defs, sigs = self.defs(CORE + "repo/UserRepository.ts")
+        names = [(d[1], d[3]) for d in defs]
+        self.assertIn((1, "constructor"), names)
+        self.assertNotIn((1, "client"), names)  # fields are data; the graph keeps them
+        self.assertNotIn((1, "cache"), names)
+        self.assertEqual(sigs["UserRepository"],
+                         "@Injectable export class UserRepository extends BaseRepository<User>")
+        self.assertEqual(sigs["log"], "protected log(msg: string): void")
+
+    def test_skips_locals_entries_fields_and_aliases(self):
+        _, defs, _ = self.defs(WEB + "components/UserList.tsx")
+        self.assertEqual([d[3] for d in defs], ["UserList"])  # not onSelect / first / re
+        _, defs, _ = self.defs(CORE + "models/user.ts")
+        self.assertEqual([d[3] for d in defs], ["User", "UserId", "Role", "displayName"])
+        _, defs, sigs = self.defs(WEB + "legacy/format.js")
+        self.assertEqual([d[3] for d in defs], ["shout", "whisper", "flush", "default"])
+        self.assertEqual(sigs["default"], "export default { … }")
+
+    def test_only_names_other_files_can_use_are_link_targets(self):
+        from agent_cli.repomap import _ts_defs_refs
+        defs, _ = _ts_defs_refs("export function a() {}\nconst b = 1\nexport class C { m() {} }\n"
+                                "export default function () {}", "x/Widget.ts")
+        self.assertEqual([(d[3], d[5]) for d in defs], [("a", 1), ("b", 0), ("C", 1), ("m", 0),
+                                                        ("Widget", 1)])
+        defs, _ = _ts_defs_refs("declare function track(e: string): void", "globals.d.ts")
+        self.assertEqual([(d[3], d[5]) for d in defs], [("track", 1)])  # a script: global
+
+    def test_vue_keeps_regex_and_cache_version_reindexes(self):
+        from agent_cli import repomap
+        tmp = Path(tempfile.mkdtemp())
+        try:
+            (tmp / "A.vue").write_text("<script>\nexport function setup() {}\n</script>\n")
+            self.assertEqual([d[3] for d in repomap.extract(tmp / "A.vue")["defs"]], ["setup"])
+            (tmp / "a.ts").write_text("export const f = () => 1\n")
+            (tmp / ".agent-cache").mkdir()
+            (tmp / ".agent-cache" / "repomap.json").write_text(
+                '{"version": 4, "parsers": [], "files": {}}')
+            rm = repomap.RepoMap(tmp)
+            _total, reparsed = rm.build()
+            self.assertEqual(reparsed, 2)
+            self.assertEqual(rm.files["a.ts"]["defs"][0][3:], ["f", "export const f = () => …", 1])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TsPerformanceSmokeTest(unittest.TestCase):
     def test_generated_project(self):
         tmp = Path(tempfile.mkdtemp())

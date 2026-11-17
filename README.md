@@ -392,6 +392,14 @@ constructors and fields; without them a regex fallback is used, which can mistak
 calls or enum constants for definitions. Installing or removing a grammar
 re-indexes the cache automatically.
 
+TypeScript and JavaScript use the code graph's own parser (no extra install). The
+map lists classes, interfaces, enums, type aliases, namespaces, functions,
+arrow-function `const`s and object-literal modules (`export const api = { … }`), plus
+their methods, accessors and constructors, with `export` / `export default`
+shown. Local functions and member fields are left out. Only the names a file
+exports (or, for a script without imports/exports, all of its top-level names) count
+as things other files can depend on. `.vue` files still use the regex patterns.
+
 ## Code graph (`agent graph`, Kotlin / Android, Swift / iOS, TypeScript / JavaScript)
 
 A resolved graph of a Kotlin Android project: classes, functions, properties,

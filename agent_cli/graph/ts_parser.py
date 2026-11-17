@@ -1086,6 +1086,7 @@ class _TsParser(_Parser):
 
     def parse_var_decl(self, parent: int, mods: List[str], annos: List[str]) -> List[str]:
         """Top-level (or namespace-level) const / let / var."""
+        kw = self.text()
         self.p += 1
         names = []  # type: List[str]
         while self.p < self.n:
@@ -1125,7 +1126,7 @@ class _TsParser(_Parser):
                 if self._function_value_at(1):
                     self.p += 1
                     idx = self.add_decl("fun", name, parent, line, mods, annos, tparams=[], recv="",
-                                        params=[], ret="", ftype=ptype)
+                                        params=[], ret="", ftype=ptype, kw=kw)
                     self._function_value(idx)
                     names.append(name)
                     if not self.eat(","):
@@ -1146,7 +1147,7 @@ class _TsParser(_Parser):
                         break
                     continue
             idx = self.add_decl("prop", name, parent, line, mods, annos, recv="", type=ptype,
-                                delegate="", has_init=False)
+                                delegate="", has_init=False, kw=kw)
             names.append(name)
             d = self.decls[idx]
             if self.eat("="):
@@ -1498,6 +1499,69 @@ class _TsParser(_Parser):
                 if tmp.get("itype"):
                     locals_[name] = [tmp["itype"], "ctor"]
             return
+
+
+def signature(d: dict) -> str:
+    """One-line signature of a decl, e.g. 'async load(id: string): Promise<User>'."""
+    k = d["kind"]
+    if d["name"] == "<module>":
+        return "top-level code"
+    mods = " ".join(m for m in d.get("mods", ()) if m in (
+        "private", "protected", "static", "abstract", "override", "readonly", "async", "declare"))
+    attrs = " ".join("@" + a for a in d.get("annos", ()))
+    pre = " ".join(x for x in (attrs, mods) if x)
+    pre = pre + " " if pre else ""
+    tp = f"<{', '.join(d['tparams'])}>" if d.get("tparams") else ""
+
+    def param(p):
+        name = "{…}" if p[0] == "<destructured>" else p[0]
+        return f"{'...' if p[5] else ''}{name}{'?' if p[3] else ''}{': ' + p[1] if p[1] else ''}"
+
+    if k in ("fun", "init"):
+        ps = ", ".join(param(p) for p in d.get("params", ()))
+        if k == "init":
+            s = f"{pre}constructor({ps})"
+        elif d.get("ftype") and not d.get("ret"):
+            s = f"{pre}{d.get('kw') or 'const'} {d['name']}: {d['ftype']} = ({ps}) => …"
+        elif d.get("kw"):  # const f = (…) => …
+            s = f"{pre}{d['kw']} {d['name']} = {tp}({ps}){': ' + d['ret'] if d.get('ret') else ''} => …"
+        else:
+            s = f"{pre}{'function ' if d.get('parent', -1) < 0 else ''}{d['name']}{tp}({ps})"
+            if d.get("ret"):
+                s += f": {d['ret']}"
+    elif k in ("class", "interface", "enum", "namespace"):
+        s = f"{pre}{k} {d['name']}{tp}"
+        ext = [x[0] for x in d.get("supers", ()) if x[1]]
+        impl = [x[0] for x in d.get("supers", ()) if not x[1]]
+        if ext:
+            s += " extends " + ", ".join(ext)
+        if impl:
+            s += (" extends " if k == "interface" else " implements ") + ", ".join(impl)
+    elif k == "object":
+        s = f"const {d['name']} = {{ … }}" if d["name"] != "default" else "export default { … }"
+    elif k == "prop":
+        s = f"{pre}{d['kw'] + ' ' if d.get('kw') else ''}{d['name']}"
+        if d.get("type"):
+            s += f": {d['type']}"
+        elif d.get("itype"):
+            s += f" = new {d['itype']}(…)"
+        elif d.get("dtype"):
+            s += f" = inject({d['dtype']})"
+        elif d.get("alias") and d["alias"] != d["name"]:
+            s += f": {d['alias']}"
+    elif k == "typealias":
+        s = f"type {d['name']}{tp} = {d.get('type', '')}"
+    else:
+        s = d["name"]
+    return s if len(s) <= 180 else s[:177] + "..."
+
+
+def parse_ts_with_idents(source: str, rel: str = "x.ts") -> Tuple[dict, List[str]]:
+    """Facts plus every identifier token in code (not in strings, comments or
+    JSX text), for the repo map's references."""
+    parser = _TsParser(source, rel)
+    facts = parser.run()
+    return facts, [t[1].lstrip("#") for t in parser.t if t[0] == ID]
 
 
 def parse_ts(source: str, rel: str = "x.ts") -> dict:

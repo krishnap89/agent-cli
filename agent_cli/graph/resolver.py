@@ -38,6 +38,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from . import ts_modules
 from .kotlin_parser import _head
+from .ts_parser import signature as _ts_sig
 from .model import (AMBIGUOUS, CALLS, CLASS_KINDS, CODE_KINDS, CONTAINS, DEPENDS_ON, EXTRACTED,
                     IMPORTS, INFERRED, INHERITS, INJECTS, OVERRIDES, REFERENCES, USES_TYPE,
                     CodeGraph, Edge, Node)
@@ -240,58 +241,6 @@ def _swift_sig(d: dict) -> str:
         s = f"typealias {d['name']} = {d.get('type', '')}"
     elif k == "entry":
         s = f"case {d['name']}"
-    else:
-        s = d["name"]
-    return s if len(s) <= 180 else s[:177] + "..."
-
-
-def _ts_sig(d: dict) -> str:
-    k = d["kind"]
-    if d["name"] == "<module>":
-        return "top-level code"
-    mods = " ".join(m for m in d.get("mods", ()) if m in (
-        "private", "protected", "static", "abstract", "override", "readonly", "async", "declare"))
-    attrs = " ".join("@" + a for a in d.get("annos", ()))
-    pre = " ".join(x for x in (attrs, mods) if x)
-    pre = pre + " " if pre else ""
-    tp = f"<{', '.join(d['tparams'])}>" if d.get("tparams") else ""
-
-    def param(p):
-        name = "{…}" if p[0] == "<destructured>" else p[0]
-        return f"{'...' if p[5] else ''}{name}{'?' if p[3] else ''}{': ' + p[1] if p[1] else ''}"
-
-    if k in ("fun", "init"):
-        ps = ", ".join(param(p) for p in d.get("params", ()))
-        if k == "init":
-            s = f"{pre}constructor({ps})"
-        elif d.get("ftype") and not d.get("ret"):
-            s = f"{pre}const {d['name']}: {d['ftype']} = ({ps}) => …"
-        else:
-            s = f"{pre}{'function ' if d.get('parent', -1) < 0 else ''}{d['name']}{tp}({ps})"
-            if d.get("ret"):
-                s += f": {d['ret']}"
-    elif k in ("class", "interface", "enum", "namespace"):
-        s = f"{pre}{k} {d['name']}{tp}"
-        ext = [x[0] for x in d.get("supers", ()) if x[1]]
-        impl = [x[0] for x in d.get("supers", ()) if not x[1]]
-        if ext:
-            s += " extends " + ", ".join(ext)
-        if impl:
-            s += (" extends " if k == "interface" else " implements ") + ", ".join(impl)
-    elif k == "object":
-        s = f"const {d['name']} = {{ … }}" if d["name"] != "default" else "export default { … }"
-    elif k == "prop":
-        s = f"{pre}{d['name']}"
-        if d.get("type"):
-            s += f": {d['type']}"
-        elif d.get("itype"):
-            s += f" = new {d['itype']}(…)"
-        elif d.get("dtype"):
-            s += f" = inject({d['dtype']})"
-        elif d.get("alias") and d["alias"] != d["name"]:
-            s += f": {d['alias']}"
-    elif k == "typealias":
-        s = f"type {d['name']}{tp} = {d.get('type', '')}"
     else:
         s = d["name"]
     return s if len(s) <= 180 else s[:177] + "..."
