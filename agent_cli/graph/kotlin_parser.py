@@ -877,9 +877,11 @@ def _join(toks: List[Token]) -> str:
 
 
 def _head(type_text: str) -> str:
-    """'List<User>?' -> 'List'; 'a.b.Foo<T>' -> 'a.b.Foo'; '(A) -> B' -> ''."""
-    m = re.match(r"\s*(?:(?:suspend|some|any|inout|borrowing|consuming|sending)\s+|@\w+\s+)*"
-                 r"([A-Za-z_][\w.]*)", type_text)
+    """'List<User>?' -> 'List'; 'a.b.Foo<T>' -> 'a.b.Foo'; '(A) -> B' -> '';
+    TypeScript: 'null | User' -> 'User', 'readonly User[]' -> 'User'."""
+    m = re.match(r"\s*\|?\s*(?:(?:suspend|some|any|inout|borrowing|consuming|sending|readonly)\s+"
+                 r"|@\w+\s+|(?:null|undefined|void)\s*\|\s*)*"
+                 r"([A-Za-z_$][\w.$]*)", type_text)
     return m.group(1) if m else ""
 
 

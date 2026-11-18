@@ -1,4 +1,4 @@
-"""Turn per-file facts into a resolved CodeGraph (Kotlin and Swift).
+"""Turn per-file facts into a resolved CodeGraph (Kotlin, Swift, TypeScript / JavaScript).
 
 Name resolution follows the language's scoping, in order, and records how sure
 it is (for Swift, "package" means the module: Gradle-less projects get their
@@ -20,12 +20,25 @@ Swift specifics: `extension Foo` adds its members (and conformances) to Foo;
 an extension of an external type (String, UIView) behaves like a Kotlin
 extension function on it. Overloads are told apart by argument labels;
 methods that implement a protocol requirement get an inferred `overrides`.
+
+TypeScript / JavaScript specifics: a file is its own namespace (ids start with
+the path without extension: src/api/user.UserApi.load). Imports are bound to
+the declarations they name by following the specifier (ts_modules: relative,
+tsconfig paths/baseUrl, workspace packages) and the target's exports through
+barrels (`export * from`, `export { a as b } from`), default exports and
+CommonJS (`module.exports = {…}`, `exports.x =`); `import * as ns` binds a
+namespace. A bare call never means `this.x()`; names that are neither local
+nor imported only match declarations of global scripts (.d.ts, files without
+imports/exports). Methods that implement an interface or redefine a base
+class method (no `override` keyword needed) get an inferred `overrides`.
 """
 import re
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
 
+from . import ts_modules
 from .kotlin_parser import _head
+from .ts_parser import signature as _ts_sig
 from .model import (AMBIGUOUS, CALLS, CLASS_KINDS, CODE_KINDS, CONTAINS, DEPENDS_ON, EXTRACTED,
                     IMPORTS, INFERRED, INHERITS, INJECTS, OVERRIDES, REFERENCES, USES_TYPE,
                     CodeGraph, Edge, Node)
@@ -54,6 +67,14 @@ Identifiable Codable Decodable Encodable Hashable Equatable Comparable CaseItera
 Sendable CustomStringConvertible DispatchQueue NotificationCenter UserDefaults
 JSONDecoder JSONEncoder URLSession URLRequest Bundle FileManager DateFormatter
 XCTestCase
+Promise PromiseLike Record Partial Required Readonly Pick Omit Exclude Extract NonNullable
+ReturnType Parameters InstanceType Awaited ReadonlyArray WeakMap WeakSet Object Function
+Symbol BigInt Number Boolean RegExp TypeError RangeError SyntaxError JSON Math Reflect Proxy
+Intl ArrayBuffer Uint8Array DataView Response Request Headers URLSearchParams FormData Blob
+File FileReader Event CustomEvent EventTarget KeyboardEvent MouseEvent HTMLElement
+HTMLDivElement HTMLInputElement HTMLButtonElement HTMLFormElement Element Node Document
+Window Storage AbortController AbortSignal ReadableStream TextEncoder TextDecoder
+Buffer NodeJS Iterable AsyncIterable Generator AsyncGenerator PropertyKey
 """.split())
 # Swift property wrappers / attributes that mean "this dependency is provided".
 SWIFT_INJECT_WRAPPERS = frozenset({
@@ -94,6 +115,27 @@ environmentObject environment tag opacity shadow offset animation transition
 sync asyncAfter post addObserver removeObserver object bool integer string data
 sorted joined lowercased uppercased trimmingCharacters components hasPrefix hasSuffix
 first last prefix suffix dropFirst dropLast index enumerated reversed contains
+then finally push pop shift unshift slice splice concat includes join keys values entries
+some every findIndex findLast fill flat padStart padEnd toFixed toUpperCase toLowerCase
+trimStart trimEnd charAt charCodeAt localeCompare json text blob send status end on once
+off listen use has delete patch next pipe unsubscribe log warn error info debug
+querySelector querySelectorAll addEventListener removeEventListener preventDefault
+stopPropagation getElementById createElement appendChild setAttribute getAttribute bind
+call apply resolve reject assign freeze parse stringify toISOString getTime test exec match
+matchAll replaceAll getItem setItem removeItem dispatch findOne findMany findUnique
+findFirst toBe toEqual toStrictEqual toHaveBeenCalled toHaveBeenCalledWith toMatchObject
+toThrow toBeTruthy toBeFalsy toBeDefined toBeUndefined toBeNull toContain toHaveLength
+mockReturnValue mockResolvedValue mockImplementation mockRejectedValue focus blur click
+exists save findAll findById findBy findOneBy upsert
+""".split())
+# JS / test-runner globals: a bare call to one of these is external, not a
+# missed project function (even if the project has a method of that name).
+JS_GLOBAL_FUNCS = frozenset("""
+describe it test expect beforeEach afterEach beforeAll afterAll suite xit xdescribe fit
+setTimeout setInterval clearTimeout clearInterval setImmediate queueMicrotask
+requestAnimationFrame cancelAnimationFrame fetch require parseInt parseFloat isNaN isFinite
+encodeURIComponent decodeURIComponent encodeURI decodeURI structuredClone alert confirm
+prompt atob btoa
 """.split())
 _TYPE_NAME_RE = re.compile(r"[A-Za-z_][\w]*(?:\.[A-Za-z_]\w*)*")
 _MAX_CANDS = 8
@@ -110,7 +152,7 @@ class _Res:
 
 
 class _FileCtx:
-    __slots__ = ("rel", "pkg", "imports", "stars", "module", "facts", "ids", "lang")
+    __slots__ = ("rel", "pkg", "imports", "stars", "module", "facts", "ids", "lang", "ns")
 
     def __init__(self, rel: str, facts: dict, module: str, pkg: Optional[str] = None):
         self.rel = rel
@@ -120,7 +162,8 @@ class _FileCtx:
         self.module = module
         self.imports = {}  # type: Dict[str, str]   simple name / alias -> fq
         self.stars = []  # type: List[str]
-        for path, alias, star, _line in facts.get("imports", ()):
+        self.ns = {}  # type: Dict[str, str]   TS: namespace import -> file
+        for path, alias, star, _line in (facts.get("imports", ()) if self.lang != "ts" else ()):
             if star:
                 self.stars.append(path)
             else:
@@ -272,15 +315,20 @@ class Resolver:
         self._edge_seen = set()  # type: Set[tuple]
         self.call_stats = defaultdict(int)  # type: Dict[str, int]
         self.unresolved_names = defaultdict(int)  # type: Dict[str, int]
+        self._tsmod = None  # type: Optional[ts_modules.TsModules]
+        self._ts_scripts = set()  # type: Set[str]   TS/JS files without imports/exports
+        self._ts_exp_cache = {}  # type: Dict[Tuple[str, str], object]
 
     # ================================================================ build
 
     def run(self) -> CodeGraph:
         self._modules()
         self._swift_modules()
+        self._npm_modules()
         self._finish_modules()
         self._declare()
         self._declare_swift_extensions()
+        self._ts_link()
         self._imports()
         self._inherits()
         self._calls()
@@ -408,6 +456,32 @@ class Resolver:
                     if tgt in self.modules and tgt != name:
                         self._deps[name].add(tgt)
 
+    def _npm_modules(self) -> None:
+        """Modules from package.json files (workspace packages), with
+        depends_on from dependencies on other workspace packages."""
+        pkgs = [(rel, f) for rel, f in sorted(self.facts.items()) if f.get("lang") == "npm"]
+        by_pkg_name = {}  # type: Dict[str, str]
+        mine = []  # type: List[Tuple[str, dict]]
+        for rel, f in pkgs:
+            d = rel.rsplit("/", 1)[0] if "/" in rel else "."
+            name = f.get("name") or (d.rsplit("/", 1)[-1] if d != "." else "root")
+            if name in self.modules and not self.modules[name].get("npm"):
+                continue
+            if name in self.modules:  # two package.json with one name: keep the first
+                continue
+            self.modules[name] = {"path": d, "paths": [d], "build_file": rel, "namespace": "",
+                                  "deps": [], "line": 1, "npm": True}
+            if f.get("name"):
+                by_pkg_name[f["name"]] = name
+            mine.append((name, f))
+        for name, f in mine:
+            m = self.modules[name]
+            for dep, line in f.get("deps", ()):
+                tgt = by_pkg_name.get(dep)
+                if tgt and tgt != name:
+                    m["deps"].append((tgt, EXTRACTED, line))
+                    self._deps[name].add(tgt)
+
     def _finish_modules(self) -> None:
         for name, m in self.modules.items():
             self.g.add_node(Node("module:" + name, "module", name, file=m["build_file"],
@@ -478,6 +552,8 @@ class Resolver:
                     self._declare_decl(ctx, i, d, ctx.owner(d["parent"]))
             elif lang == "swift":
                 self._declare_swift(rel, f, module)
+            elif lang == "ts":
+                self._declare_ts(rel, f, module)
             elif lang == "res":
                 self._declare_res(rel, f, module)
             elif lang in ("xcasset", "strings", "xcstrings", "ib"):
@@ -486,7 +562,8 @@ class Resolver:
     def _declare_swift(self, rel: str, f: dict, module: str) -> None:
         """Pass 1: everything except extension contents (their target types
         may live in files not declared yet)."""
-        swift_module = module if module and not module.startswith(":") else ""
+        swift_module = module if module and not module.startswith(":") \
+            and not self.modules.get(module, {}).get("npm") else ""
         ctx = _FileCtx(rel, f, module, pkg=swift_module)
         if swift_module:
             ctx.stars.append(swift_module)
@@ -500,6 +577,14 @@ class Resolver:
                 self._declare_decl(ctx, i, d, ctx.owner(p))
         if any(in_ext):
             self._pending_ext.append((ctx, in_ext))
+
+    def _declare_ts(self, rel: str, f: dict, module: str) -> None:
+        ctx = _FileCtx(rel, f, module, pkg=ts_modules.strip_ext(rel))
+        self.files[rel] = ctx
+        for i, d in enumerate(f.get("decls", ())):
+            self._declare_decl(ctx, i, d, ctx.owner(d["parent"]))
+        if not f.get("module"):
+            self._ts_scripts.add(rel)
 
     def _declare_swift_extensions(self) -> None:
         """Pass 2: attach extension members to their (now declared) types;
@@ -553,8 +638,9 @@ class Resolver:
                 nid = f"{stem}#{d['line']}.{k}"
                 k += 1
         kind = _KIND.get(d["kind"], d["kind"])
+        sig = _swift_sig(d) if swift else _ts_sig(d) if ctx.lang == "ts" else _sig(d)
         node = g.add_node(Node(nid, kind, d["name"], rel, d["line"], d.get("end", d["line"]),
-                               parent_id, _swift_sig(d) if swift else _sig(d), module))
+                               parent_id, sig, module))
         node.extra["decl"] = d
         node.extra["pkg"] = pkg
         node.extra["lang"] = ctx.lang
@@ -614,6 +700,136 @@ class Resolver:
             for ident, line in f.get("ids", ()):
                 res_node("vcid", ident, line)
 
+    # ---------------------------------------------------------------- TS modules
+
+    def _ts_link(self) -> None:
+        """Bind every TS/JS import to the declaration (or namespace file) it names."""
+        ts = [rel for rel, c in self.files.items() if c.lang == "ts"]
+        if not ts:
+            return
+        self._tsmod = ts_modules.TsModules(self.facts, ts)
+        for rel in sorted(ts):
+            ctx = self.files[rel]
+            for spec, imported, local, _line in ctx.facts.get("imports", ()):
+                if local is None:
+                    continue
+                b = self._ts_import(rel, spec, imported, frozenset())
+                if isinstance(b, tuple):
+                    ctx.ns[local] = b[1]
+                else:  # a node id, or an external marker ("react:useState")
+                    ctx.imports[local] = b if b is not None else f"{spec}:{imported}"
+        self._type_cache.clear()
+
+    def _ts_import(self, rel: str, spec: str, imported: Optional[str], seen) -> object:
+        """What `import {imported} from spec` in rel binds: a node id,
+        ("ns", file) for a namespace, or None."""
+        target = self._tsmod.resolve(rel, spec) if self._tsmod else None
+        if target is None or target not in self.files:
+            return None
+        if imported == "*":
+            return ("ns", target)
+        if imported == "=":  # const x = require('m') / import x = require('m')
+            hit = self._ts_export(target, "default", seen)
+            return hit if hit is not None else ("ns", target)
+        return self._ts_export(target, imported or "default", seen)
+
+    def _ts_export(self, rel: str, name: str, seen=frozenset()) -> object:
+        key = (rel, name)
+        if key in self._ts_exp_cache:
+            return self._ts_exp_cache[key]
+        if key in seen:
+            return None
+        seen = seen | {key}
+        f = self.facts.get(rel, {})
+        exports = f.get("exports", ())
+        res = None  # type: object
+        for exported, local, spec, _line in exports:
+            if exported != name:
+                continue
+            res = self._ts_binding(rel, local, seen) if spec is None else \
+                self._ts_import(rel, spec, local, seen)
+            if res is not None:
+                break
+        if res is None and name != "default":
+            for exported, _local, spec, _line in exports:  # export * from './x'
+                if exported == "*" and spec:
+                    res = self._ts_import(rel, spec, name, seen)
+                    if res is not None:
+                        break
+        if res is None and name != "default":  # CommonJS: a member of module.exports
+            obj = self._ts_export(rel, "default", seen)
+            if isinstance(obj, str) and self.g.nodes[obj].kind in CLASS_KINDS:
+                hits = self.members.get(obj, {}).get(name)
+                if hits:
+                    res = self._ts_alias(hits[0], seen)
+        if res is None and not exports and not f.get("module"):
+            hits = self.top_by_file[rel].get(name)
+            res = hits[0] if hits else None
+        self._ts_exp_cache[key] = res
+        return res
+
+    def _ts_binding(self, rel: str, local: Optional[str], seen) -> object:
+        """A name in a file's top-level scope: its declaration or import."""
+        if not local:
+            return None
+        hits = self.top_by_file[rel].get(local)
+        if hits:
+            return self._ts_alias(hits[0], seen)
+        for spec, imported, loc, _line in self.facts[rel].get("imports", ()):
+            if loc == local:
+                return self._ts_import(rel, spec, imported, seen)
+        return None
+
+    def _ts_alias(self, nid: str, seen=frozenset()) -> object:
+        """An object member that only names a value (`{ shout }`, `{ w: whisper }`)
+        stands for that value."""
+        node = self.g.nodes[nid]
+        alias = node.extra.get("decl", {}).get("alias")
+        if node.kind != "property" or not alias:
+            return nid
+        hit = self._ts_binding(node.file, alias, seen)
+        return hit if isinstance(hit, str) else nid
+
+    def _ts_aliases(self, ids: List[str]) -> List[str]:
+        return [self._ts_alias(i) if self.g.nodes[i].extra.get("lang") == "ts" else i for i in ids]
+
+    def _import_targets(self, fq: str) -> List[str]:
+        """Nodes an import binding names (Kotlin/Swift: by fq name; TS: a node id)."""
+        hits = list(self.fq_top.get(fq, ()))
+        if hits:
+            return hits
+        if fq in self.fq_class:
+            return [self.fq_class[fq]]
+        return [fq] if fq in self.g.nodes else []
+
+    def _ts_local_name(self, name: str, scope: List[str]) -> bool:
+        """An untyped local / parameter / destructured name of enclosing code."""
+        for sid in scope:
+            if self.g.nodes[sid].kind not in CODE_KINDS:
+                continue
+            d = self.decl(sid)
+            if name in d.get("vars", ()) or any(p[0] == name for p in d.get("params", ())):
+                return True
+        return False
+
+    def _ts_receiver(self, s0: str, ctx: _FileCtx, scope: List[str]) -> Optional[tuple]:
+        """A TS receiver that is not a typed value: ("ns", file), ("class", id)
+        for module objects / classes / enums / namespaces, ("local",) for an
+        untyped local, ("ext",) for an external import; None otherwise."""
+        if s0 in ctx.ns:
+            return ("ns", ctx.ns[s0])
+        if self.value_type(s0, scope) is not None:
+            return None
+        if self._ts_local_name(s0, scope):
+            return ("local",)
+        hits = self._visible_top(s0, ctx)
+        cls = [h for h in hits if self.g.nodes[h].kind in CLASS_KINDS]
+        if cls:
+            return ("class", cls[0])
+        if not hits and s0 in ctx.imports:
+            return ("ext",)
+        return None
+
     # ---------------------------------------------------------------- scopes
 
     def scope(self, nid: Optional[str]) -> List[str]:
@@ -636,7 +852,23 @@ class Resolver:
     # ---------------------------------------------------------------- imports
 
     def _imports(self) -> None:
+        nodes = self.g.nodes
         for rel, ctx in self.files.items():
+            if ctx.lang == "ts":
+                fid = "file:" + rel
+                for spec, imported, local, line in ctx.facts.get("imports", ()):
+                    target = self._tsmod.resolve(rel, spec) if self._tsmod else None
+                    if target and target != rel and "file:" + target in nodes:
+                        self.edge(fid, "file:" + target, IMPORTS, EXTRACTED, 1.0, rel, line, dedupe=True)
+                        tmod = nodes["file:" + target].module
+                    else:
+                        tmod = self._tsmod.package_of(spec) if self._tsmod else None
+                    if tmod and tmod != ctx.module and "module:" + tmod in nodes:
+                        self.edge(fid, "module:" + tmod, IMPORTS, EXTRACTED, 1.0, rel, line, dedupe=True)
+                    nid = ctx.imports.get(local) if local else None
+                    if nid in nodes:
+                        self.edge(fid, nid, IMPORTS, EXTRACTED, 1.0, rel, line, dedupe=True)
+                continue
             if ctx.lang == "swift":
                 for path, alias, star, line in ctx.facts.get("imports", ()):
                     mod = path.split(".", 1)[0]
@@ -677,6 +909,17 @@ class Resolver:
 
     def _resolve_type(self, head: str, ctx: _FileCtx, scope: List[str]) -> Optional[_Res]:
         parts = head.split(".")
+        if ctx.lang == "ts" and len(parts) > 1 and parts[0] in ctx.ns:  # api.User
+            rel = ctx.ns[parts[0]]
+            for i in range(1, len(parts)):
+                hit = self._ts_export(rel, parts[i])
+                if isinstance(hit, tuple):
+                    rel = hit[1]
+                    continue
+                if not isinstance(hit, str) or self.g.nodes[hit].kind not in CLASS_KINDS:
+                    return None
+                return self._descend(_Res([hit], EXTRACTED, 1.0), parts[i + 1:])
+            return None
         if len(parts) > 1:
             for k in range(len(parts), 0, -1):
                 fq = ".".join(parts[:k])
@@ -718,7 +961,8 @@ class Resolver:
         if fq is not None:
             if fq in self.fq_class:
                 return _Res([self.fq_class[fq]], EXTRACTED, 1.0)
-            return None
+            hits = [h for h in self._import_targets(fq) if nodes[h].kind in CLASS_KINDS]
+            return _Res(hits[:1], EXTRACTED, 1.0) if hits else None
         # 4. same package, 5. star imports
         if (ctx.pkg + "." + name if ctx.pkg else name) in self.fq_class:
             return _Res([self.fq_class[ctx.pkg + "." + name if ctx.pkg else name]], EXTRACTED, 1.0)
@@ -727,8 +971,12 @@ class Resolver:
             return _Res(star, EXTRACTED if len(star) == 1 else AMBIGUOUS, 1.0 / len(star))
         if name in BUILTIN_TYPES:
             return None
-        # 6. project-wide by simple name (missing import, nested type, ...)
-        cands = self._reachable_filter(self.classes_by_name.get(name, []), ctx.module)
+        # 6. project-wide by simple name (missing import, nested type, ...);
+        #    in TS only globals (declarations of script files) are visible unimported
+        cands = self.classes_by_name.get(name, [])
+        if ctx.lang == "ts":
+            cands = self._ts_globals(cands)
+        cands = self._reachable_filter(cands, ctx.module)
         if not cands:
             return None
         if len(cands) == 1:
@@ -737,6 +985,10 @@ class Resolver:
         if len(top) == 1:
             return _Res(top, INFERRED, 0.5)
         return _Res(cands, AMBIGUOUS, round(1.0 / len(cands), 3))
+
+    def _ts_globals(self, cands: List[str]) -> List[str]:
+        nodes = self.g.nodes
+        return [c for c in cands if nodes[c].parent is None and nodes[c].file in self._ts_scripts]
 
     def type_names(self, text: str) -> List[str]:
         """Every class-looking name in a type: 'Map<String, List<User>>' ->
@@ -840,6 +1092,8 @@ class Resolver:
                         if p[0] == name and p[1]:
                             return p[1], node.parent, 0.9
             elif node.kind in SCOPE_KINDS:
+                if node.extra.get("lang") == "ts" and node.kind != "namespace":
+                    continue  # TS class members are reached through `this.`
                 for p in d.get("params", ()):
                     if p[0] == name and p[1]:
                         return p[1], sid, 0.9
@@ -872,7 +1126,7 @@ class Resolver:
             return hits
         fq = ctx.imports.get(name)
         if fq is not None:
-            return list(self.fq_top.get(fq, ())) or ([self.fq_class[fq]] if fq in self.fq_class else [])
+            return self._import_targets(fq)
         hits = list(self.top_by_pkg[ctx.pkg].get(name, ()))
         if hits:
             return hits
@@ -904,6 +1158,8 @@ class Resolver:
         if nargs < 0 or node.kind not in ("function", "constructor"):
             return True
         params = self.decl(nid).get("params", ())
+        if node.extra.get("lang") == "ts":  # JS lets callers omit trailing arguments
+            return node.kind != "function" or any(p[5] for p in params) or nargs <= len(params)
         if node.extra.get("lang") == "swift":
             if self._cur_labels is None:
                 return True
@@ -973,6 +1229,8 @@ class Resolver:
         vt = self.value_type(name, scope)
         if vt is not None and ("->" in vt[0] or vt[0].startswith("(")):
             return "invoke"
+        if ctx.lang == "ts":
+            return self._ts_resolve_bare(name, nargs, scope, ctx)
         # members of enclosing classes, and of extension receivers in scope
         external_recv = False
         for sid in scope:
@@ -1017,6 +1275,31 @@ class Resolver:
             res.conf = min(res.conf, 0.5)
         return res
 
+    def _ts_resolve_bare(self, name: str, nargs: int, scope: List[str], ctx: _FileCtx) -> Optional[object]:
+        nodes = self.g.nodes
+        if self._ts_local_name(name, scope):
+            return "invoke"  # a callback / destructured prop / untyped local
+        for sid in scope:  # functions of an enclosing namespace
+            if nodes[sid].kind == "namespace":
+                hits = self._callables(self.members.get(sid, {}).get(name, []))
+                if hits:
+                    return self._pick(hits, nargs, EXTRACTED, 1.0)
+        hits = self._callables(self._ts_aliases(self._visible_top(name, ctx)))
+        if hits:
+            return self._pick(hits, nargs, EXTRACTED, 1.0, ctx.module)
+        if name in ctx.imports or name in ctx.ns or name in BUILTIN_TYPES or name in JS_GLOBAL_FUNCS:
+            return None  # external, or not callable
+        if name[:1].isupper():
+            rt = self.resolve_type(name, ctx, scope)
+            if rt is not None:
+                return rt
+        cands = self._ts_globals(self.funcs_by_name.get(name, []) + (
+            self.classes_by_name.get(name, []) if name[:1].isupper() else []))
+        res = self._pick(cands, nargs, INFERRED, 0.5, ctx.module, strict=True)
+        if res is not None and res.prov != AMBIGUOUS:
+            res.conf = min(res.conf, 0.5)
+        return res
+
     def eval_receiver(self, segs: List[list], owner: str, ctx: _FileCtx) -> Optional[tuple]:
         """Evaluate a receiver chain. Returns (kind, target, prov, conf):
           ("class", class_id, ...)   a project class (instance or static)
@@ -1030,7 +1313,36 @@ class Resolver:
         cur = None  # type: Optional[str]
         prov, conf = INFERRED, 0.9
         rest = segs[1:]
-        if s0 == "Self":
+        tsr = self._ts_receiver(s0, ctx, scope) if ctx.lang == "ts" and not is_call \
+            and s0 not in ("this", "super") else None
+        if tsr is not None:
+            if tsr[0] == "local":
+                return None
+            if tsr[0] == "ext":
+                return ("ext", s0, INFERRED, 0.8)
+            if tsr[0] == "class":
+                cur, prov, conf = tsr[1], EXTRACTED, 1.0
+            else:  # namespace import: core.http.createClient()
+                rel = tsr[1]
+                while rest:
+                    seg, _seg_call = rest[0]
+                    hit = self._ts_export(rel, seg)
+                    if isinstance(hit, tuple):
+                        rel = hit[1]
+                        rest = rest[1:]
+                        continue
+                    if not isinstance(hit, str):
+                        return None
+                    t = self.type_of_node(self._ts_alias(hit))
+                    if t is None:
+                        return None
+                    cur, prov, conf = t.targets[0], EXTRACTED if nodes[hit].kind in CLASS_KINDS \
+                        else INFERRED, t.conf
+                    rest = rest[1:]
+                    break
+                if cur is None:
+                    return ("tsns", rel, EXTRACTED, 1.0)
+        elif s0 == "Self":
             cls = next((sid for sid in scope if nodes[sid].kind in SCOPE_KINDS), None)
             if cls is None:
                 return None
@@ -1112,6 +1424,11 @@ class Resolver:
     def resolve_member_call(self, recv: tuple, name: str, nargs: int, ctx: _FileCtx) -> Optional[_Res]:
         kind, target, prov, conf = recv
         nodes = self.g.nodes
+        if kind == "tsns":
+            hit = self._ts_export(target, name)
+            if not isinstance(hit, str):
+                return None
+            return self._pick(self._callables([self._ts_alias(hit)]), nargs, EXTRACTED, 1.0)
         if kind == "pkg":
             hits = self._callables(self.top_by_pkg[target].get(name, []))
             return self._pick(hits, nargs, EXTRACTED, 1.0)
@@ -1122,7 +1439,8 @@ class Resolver:
             exts = [e for e in self.extensions.get(name, [])
                     if _head(self.decl(e).get("recv", "")).rsplit(".", 1)[-1] == target]
             return self._pick(exts, nargs, INFERRED, round(conf * 0.9, 3), ctx.module)
-        hits = self._callables(self.find_member(target, name) or self.companion_member(target, name))
+        hits = self._callables(self._ts_aliases(
+            self.find_member(target, name) or self.companion_member(target, name)))
         if hits:
             return self._pick(hits, nargs, prov, round(conf, 3))
         # extension functions declared on the class or one of its supertypes
@@ -1148,7 +1466,9 @@ class Resolver:
         if name in COMMON_MEMBER_NAMES:
             self.call_stats["common_skipped"] += 1
             return None
-        cands = [c for c in self.funcs_by_name.get(name, []) if self.g.nodes[c].parent is not None
+        nodes = self.g.nodes
+        cands = [c for c in self.funcs_by_name.get(name, [])
+                 if (nodes[c].parent is not None and nodes[nodes[c].parent].kind in SCOPE_KINDS)
                  or self.decl(c).get("recv")]
         if not cands:
             return None
@@ -1188,8 +1508,9 @@ class Resolver:
                     continue
                 if res is None and recv is None:
                     fq = ctx.imports.get(name)
-                    if (fq is not None and fq not in self.fq_class and fq not in self.fq_top) \
-                            or name in BUILTIN_TYPES:
+                    if (fq is not None and fq not in self.fq_class and fq not in self.fq_top
+                            and fq not in self.g.nodes) or name in BUILTIN_TYPES \
+                            or (ctx.lang == "ts" and name in JS_GLOBAL_FUNCS):
                         external = True  # explicitly imported from a library
                 if isinstance(res, _Res):
                     st[res.prov] += 1
@@ -1248,6 +1569,7 @@ class Resolver:
                 for p in d.get("params", ()):
                     self._uses_types(nid, p[1], ctx, scope, node.line)
                 self._uses_types(nid, d.get("ret", ""), ctx, scope, node.line)
+                self._uses_types(nid, d.get("ftype", ""), ctx, scope, node.line)
                 if d.get("recv"):
                     self._uses_types(nid, d["recv"], ctx, scope, node.line)
             for loc_type, _how in d.get("locals", {}).values():
@@ -1295,6 +1617,8 @@ class Resolver:
             if "override" not in d.get("mods", ()):
                 if swift and pnode.kind in CLASS_KINDS and pnode.kind != "protocol":
                     self._protocol_witness(nid, node, parent)
+                elif node.extra.get("lang") == "ts" and pnode.kind in ("class", "object"):
+                    self._ts_implements(nid, node, parent)
                 continue
             bases = []  # type: List[Tuple[str, str, float]]
             if pnode.kind == "entry":  # enum entry body overrides the enum's members
@@ -1324,6 +1648,16 @@ class Resolver:
                     self.edge(nid, hits[0], OVERRIDES, prov if prov != AMBIGUOUS else INFERRED,
                               conf, node.file, node.line, hits)
                     break
+
+    def _ts_implements(self, nid: str, node: Node, parent: str) -> None:
+        """TS: a member that implements an interface member or redefines a
+        base-class member (no `override` keyword) -> inferred overrides."""
+        nodes = self.g.nodes
+        for anc in self.ancestors(parent)[1:]:
+            for h in self.members.get(anc, {}).get(node.name, ()):
+                if nodes[h].kind in ("function", "property"):
+                    self.edge(nid, h, OVERRIDES, INFERRED, 0.9, node.file, node.line, dedupe=True)
+                    return
 
     def _protocol_witness(self, nid: str, node: Node, parent: str) -> None:
         """Swift: a member implementing a protocol requirement (no `override`

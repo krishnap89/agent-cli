@@ -12,7 +12,7 @@ EDGE_KINDS = (CONTAINS, IMPORTS, CALLS, INHERITS, INJECTS, USES_TYPE, OVERRIDES,
 EXTRACTED, INFERRED, AMBIGUOUS = "extracted", "inferred", "ambiguous"
 
 CLASS_KINDS = frozenset({"class", "interface", "object", "enum", "annotation", "typealias",
-                         "struct", "protocol", "actor"})
+                         "struct", "protocol", "actor", "namespace"})
 CODE_KINDS = frozenset({"function", "constructor", "property"})
 
 

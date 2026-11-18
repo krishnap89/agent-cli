@@ -1,0 +1,5 @@
+{
+  "name": "ts-sample",
+  "private": true,
+  "workspaces": ["packages/*", "apps/*"]
+}

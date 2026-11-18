@@ -4,11 +4,13 @@ How it works
 1. List source files (git ls-files, so .gitignore is respected).
 2. For each file, extract definitions (classes, functions, methods + line
    numbers + signatures) and the set of identifiers the file uses.
-   Python uses the ast module; other languages use simple regex patterns.
+   Python uses the ast module; TypeScript / JavaScript use the code graph's
+   parser (agent_cli.graph.ts_parser); Kotlin, Swift and Java use tree-sitter
+   when it is installed; other languages use simple regex patterns.
    Results are cached in .agent-cache/ and only changed files are re-parsed.
 3. Build a file→file dependency graph: an edge from A→B means A references a
    symbol defined in B.  Run iterative PageRank on this graph so files that
-   are depended on by many important files bubble up.  For Kotlin and Swift projects
+   are depended on by many important files bubble up.  For Kotlin, Swift and TS/JS projects
    the precise code graph (agent_cli.graph: resolved call / inherit / inject
    edges) replaces those identifier edges for every file it has edges for;
    other files, or any failure, keep the identifier-based ranking.
@@ -31,8 +33,10 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 MAX_FILE_BYTES = 500_000
+# Sources the code graph (agent_cli.graph) understands.
+_GRAPH_EXTS = (".kt", ".swift", ".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
 SKIP_DIRS = {
     ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", "env",
     "dist", "build", "target", "out", "vendor", ".idea", ".vscode", ".agent-cache",
@@ -461,6 +465,62 @@ def _java_refs(source: str) -> Set[str]:
     return refs
 
 
+# ---- TypeScript / JavaScript extraction (the code graph's parser) -----------
+
+_TS_EXTS = frozenset({".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"})
+# Declarations whose members are listed (nested one level deeper).
+_TS_CONTAINERS = frozenset({"class", "interface", "enum", "namespace", "object"})
+_TS_TYPES = _TS_CONTAINERS | {"typealias"}
+_TS_SYNTHETIC = frozenset({"<module>", "<init>", "<anonymous>", "<computed>", "<destructured>",
+                           "<tuple>"})
+
+
+def _ts_defs_refs(source: str, path: str) -> Tuple[List[list], Set[str]]:
+    """Definitions and references for TS/JS: top-level declarations and the
+    members of classes, interfaces, enums, namespaces and module objects
+    (`export const api = { load() {} }`), with `export` / `export default`
+    on exported ones. Local functions, enum entries, member fields (the code
+    graph keeps them) and ALL_CAPS constants are left out. References are the identifiers in code.
+    Each def has a 6th element: 1 if other files can refer to it by name
+    (exported, or top level in a script without imports/exports), else 0."""
+    from .graph.ts_parser import parse_ts_with_idents, signature
+    facts, idents = parse_ts_with_idents(source, path)
+    decls = facts["decls"]
+    exported = {}  # type: Dict[str, str]
+    for name, local, spec, _line in facts.get("exports", ()):
+        if spec is None and local and local != "*":
+            exported.setdefault(local, "export default " if name == "default" else "export ")
+    defs = []  # type: List[list]
+    for d in decls:
+        kind, name = d["kind"], d["name"]
+        if name in _TS_SYNTHETIC or kind in ("entry",) or (kind == "init" and name != "constructor"):
+            continue
+        depth, p, ok = 0, d["parent"], True
+        while p >= 0:
+            if decls[p]["kind"] not in _TS_CONTAINERS:
+                ok = False  # inside a function: a local
+                break
+            depth += 1
+            p = decls[p]["parent"]
+        if not ok:
+            continue
+        parent = decls[d["parent"]] if d["parent"] >= 0 else None
+        if kind == "prop" and (depth > 0 and "params" not in d or name.isupper() or d.get("alias")):
+            continue  # data fields (DTOs, entities, props); accessors (get x()) stay
+        sig = signature(d)
+        linkable = depth == 0 and name != "default" and (name in exported or not facts.get("module"))
+        if depth == 0 and name in exported and not sig.startswith("export"):
+            words = sig.split(" ")
+            k = 0
+            while k < len(words) and words[k].startswith("@"):  # decorators stay first
+                k += 1
+            sig = " ".join(words[:k] + [exported[name].strip()] + words[k:])
+        defs.append([d["line"], min(depth, 3), "class" if kind in _TS_TYPES else "def", name, sig[:200],
+                     1 if linkable else 0])
+    defs.sort(key=lambda x: x[0])
+    return defs, set(idents)
+
+
 def _parser_tag() -> List[str]:
     """Which tree-sitter grammars are active. Stored in the cache so that
     installing or removing one re-indexes files parsed the other way."""
@@ -545,6 +605,9 @@ def extract(path: Path) -> Optional[dict]:
     elif ext == ".py":
         defs = _python_defs(source)
         refs = sorted(_python_refs(source))
+    elif ext in _TS_EXTS:
+        defs, ts_refs = _ts_defs_refs(source, str(path))
+        refs = sorted(ts_refs)
     else:
         defs = _regex_defs(source, ext)
         refs = sorted(_extract_refs(source, ext))
@@ -657,11 +720,14 @@ class RepoMap:
         """Build a file→file dependency graph and run PageRank."""
         files = self.files
 
-        # Map: symbol name → set of files that define it
+        # Map: symbol name → set of files that define it. A TS/JS def that
+        # other files cannot name (a member reached as obj.x, or a top-level
+        # name the module does not export) is not a link target (d[5] == 0).
         sym_to_definers: Dict[str, Set[str]] = defaultdict(set)
         for rel, info in files.items():
             for d in info["defs"]:
-                sym_to_definers[d[3]].add(rel)
+                if len(d) < 6 or d[5]:
+                    sym_to_definers[d[3]].add(rel)
 
         # How many files reference each symbol (for per-symbol scoring)
         ref_counts: Dict[str, int] = Counter()
@@ -721,12 +787,12 @@ class RepoMap:
         self._graph_rank(all_files)
 
     def _graph_rank(self, all_files: List[str]) -> None:
-        """Re-rank with PageRank over the Kotlin/Swift code graph's call/inherit/
-        inject edges. Keeps the identifier-based ranks if there is no Kotlin/Swift,
-        the graph has no cross-file edges, it is disabled (AGENT_GRAPH_RANK=0)
-        or anything goes wrong."""
+        """Re-rank with PageRank over the Kotlin/Swift/TypeScript code graph's
+        call/inherit/inject edges. Keeps the identifier-based ranks if there is
+        no such source, the graph has no cross-file edges, it is disabled
+        (AGENT_GRAPH_RANK=0) or anything goes wrong."""
         if os.getenv("AGENT_GRAPH_RANK", "1") == "0" or \
-                not any(f.endswith((".kt", ".swift")) for f in all_files):
+                not any(f.endswith(_GRAPH_EXTS) for f in all_files):
             return
         try:
             from .graph.rank import graph_file_ranks

@@ -67,7 +67,7 @@ def graph_file_ranks(root: Path, files: List[str],
                      cache_dir: Optional[Path] = None) -> Optional[Dict[str, float]]:
     """File ranks for the repo map. Files with outgoing call/inherit/inject
     edges in the code graph use those; every other file keeps its
-    identifier-based edges (the old ranking). None when there is no Kotlin
+    identifier-based edges (the old ranking). None when there is no code
     graph to use."""
     from .build import load_graph
     graph, _info = load_graph(root, cache_dir=cache_dir)

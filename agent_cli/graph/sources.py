@@ -12,6 +12,8 @@ Every extractor returns a JSON-serializable dict with a "lang" key:
   manifest  {"package": str, "classes": [[class_name, line]]}
   swift     see swift_parser.parse_swift
   spm, xcodeproj, ib, strings, xcstrings, xcasset, plist   see ios_sources
+  ts        TypeScript / JavaScript, see ts_parser.parse_ts
+  npm, tsconfig   package.json, tsconfig*.json / jsconfig*.json, see ts_modules
 """
 import os
 import re
@@ -20,13 +22,19 @@ from pathlib import Path
 from typing import List, Optional
 
 from ..repomap import MAX_FILE_BYTES, SKIP_DIRS
-from . import ios_sources
+from . import ios_sources, ts_modules
 from .kotlin_parser import parse_kotlin
 from .swift_parser import parse_swift
+from .ts_parser import parse_ts
 
 # Third-party / generated trees on top of the repo map's SKIP_DIRS.
 GRAPH_SKIP_DIRS = SKIP_DIRS | {"Pods", "Carthage", "DerivedData", ".build", ".swiftpm",
-                                "SourcePackages", "xcuserdata", "checkouts"}
+                                "SourcePackages", "xcuserdata", "checkouts",
+                                # JS / TS build output and tool caches
+                                ".turbo", ".svelte-kit", ".expo", ".output", ".vercel",
+                                ".angular", ".parcel-cache", ".yarn", ".pnpm-store",
+                                "bower_components", "jspm_packages", "storybook-static"}
+_TSCONFIG_RE = re.compile(r"^(tsconfig|jsconfig)(\.[\w.-]+)?\.json$")
 # project.pbxproj files of big apps are often several MB.
 MAX_BYTES = {"xcodeproj": 8_000_000, "xcstrings": 4_000_000}
 GRADLE_NAMES = frozenset({"build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts"})
@@ -54,6 +62,15 @@ def classify(rel: str) -> Optional[str]:
     suffix = p.suffix.lower()
     if suffix == ".kt":
         return "kotlin"
+    if suffix in ts_modules.TS_SOURCE_EXTS:
+        low = name.lower()
+        if low.endswith((".min.js", ".bundle.js", ".chunk.js")):
+            return None
+        return "ts"
+    if name == "package.json":
+        return "npm"
+    if _TSCONFIG_RE.match(name):
+        return "tsconfig"
     if name == "Package.swift":
         return "spm"
     if suffix == ".swift":
@@ -130,6 +147,12 @@ def extract(root: Path, rel: str) -> Optional[dict]:
         facts = ios_sources.parse_strings(text)
     elif lang == "xcstrings":
         facts = ios_sources.parse_xcstrings(text)
+    elif lang == "ts":
+        facts = parse_ts(text, rel)
+    elif lang == "npm":
+        facts = ts_modules.parse_package_json(text)
+    elif lang == "tsconfig":
+        facts = ts_modules.parse_tsconfig(text)
     elif lang == "xcasset":
         kind_name = ios_sources.asset_kind(rel)
         facts = {"rtype": kind_name[0], "rname": kind_name[1]} if kind_name else {}

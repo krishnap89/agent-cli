@@ -1,0 +1,12 @@
+{
+  // the app config: aliases + JSX
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"], /* app sources */
+    },
+    "jsx": "react-jsx",
+  },
+}
