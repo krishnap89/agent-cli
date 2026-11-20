@@ -177,8 +177,9 @@ def _read_with_prompt_toolkit(prompt: str, erase: bool = False) -> str:
     # A completer can opt into showing the menu as you type (the agent REPL's
     # command completer does); otherwise the menu waits for Tab (coder REPL).
     while_typing = getattr(_completer, "complete_while_typing", False)
-    text = session.prompt(pt_prompt, completer=_completer, complete_while_typing=while_typing,
-                          erase_when_done=erase)
+    # prompt() takes no erase_when_done; the Application reads it on exit.
+    session.app.erase_when_done = erase
+    text = session.prompt(pt_prompt, completer=_completer, complete_while_typing=while_typing)
     if text.strip() == BLOCK_MARK:
         # The block's lines are read with console.input and stay on screen.
         return _read_block()
