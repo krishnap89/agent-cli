@@ -6,12 +6,13 @@ from rich.console import Console
 
 from .agent import Agent
 from .config import Config
-from .input_reader import read_message, set_completer
+from .input_reader import read_message, set_completer, was_erased
 from .mentions import expand as expand_mentions
 from .llm import list_models, switch_model
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
 from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
+from .turns import prompt_header
 from .writing import handle as handle_writing
 
 cli = typer.Typer(add_completion=False)
@@ -146,16 +147,22 @@ def main(
     # comes from `git ls-files` (list_files needs no repo-map build) and is
     # fetched lazily on first '@' and cached by the completer.
     set_completer(AgentCompleter(files_fn=lambda: agent.tools.repo_map.list_files()))
+    turn = 0
     while True:
         try:
             color = "blue" if agent.chat_only else "green"
-            text = read_message(f"[bold {color}]{agent.mode_name} › [/bold {color}]").strip()
+            text = read_message(f"[bold {color}]{agent.mode_name} › [/bold {color}]", erase=True).strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not text:
             continue
         if text in ("/exit", "/quit"):
             break
+        # Reprint the message as a numbered header so prompts stand out when
+        # scrolling back (and "#7" is something to search for). If the input
+        # method left the typed text on screen, print just the rule.
+        turn += 1
+        console.print(prompt_header(turn, text if was_erased() else None, agent.mode_name, color))
         if text in ("/chat", "/agent"):
             agent.set_mode(text == "/chat")
             console.print(f"[dim]Switched to {agent.mode_name} mode (history cleared).[/dim]")
