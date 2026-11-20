@@ -52,6 +52,7 @@ except ImportError:
 
 _session: Optional[PromptSession] = None
 _completer: Optional[Completer] = None
+_last_erased = False  # did the last read_message() erase the typed text?
 
 
 def set_completer(completer: Completer) -> None:
@@ -143,10 +144,23 @@ def _clean(line: str) -> str:
 
 # ---- public API ----------------------------------------------------------------
 
-def read_message(prompt: str) -> str:
-    """Read one message. Raises EOFError / KeyboardInterrupt like input()."""
+def was_erased() -> bool:
+    """True if the last read_message(erase=True) removed the typed text from
+    the screen, so the caller should print it again (e.g. as a turn header)."""
+    return _last_erased
+
+
+def read_message(prompt: str, erase: bool = False) -> str:
+    """Read one message. Raises EOFError / KeyboardInterrupt like input().
+
+    With erase=True the typed text is cleared from the screen once submitted,
+    where the input method allows it (prompt_toolkit, single message). Check
+    was_erased() afterwards to know whether it was.
+    """
+    global _last_erased
+    _last_erased = False
     if _pt_available and _completer is not None and sys.stdin.isatty():
-        return _read_with_prompt_toolkit(prompt)
+        return _read_with_prompt_toolkit(prompt, erase)
 
     if not _CAN_DETECT_PASTE:
         first = console.input(prompt)
@@ -156,15 +170,19 @@ def read_message(prompt: str) -> str:
         return _read_with_paste_detection(prompt)
 
 
-def _read_with_prompt_toolkit(prompt: str) -> str:
+def _read_with_prompt_toolkit(prompt: str, erase: bool = False) -> str:
+    global _last_erased
     session = _get_session()
     pt_prompt = _rich_to_pt_html(prompt)
     # A completer can opt into showing the menu as you type (the agent REPL's
     # command completer does); otherwise the menu waits for Tab (coder REPL).
     while_typing = getattr(_completer, "complete_while_typing", False)
-    text = session.prompt(pt_prompt, completer=_completer, complete_while_typing=while_typing)
+    text = session.prompt(pt_prompt, completer=_completer, complete_while_typing=while_typing,
+                          erase_when_done=erase)
     if text.strip() == BLOCK_MARK:
+        # The block's lines are read with console.input and stay on screen.
         return _read_block()
+    _last_erased = erase
     return text
 
 
