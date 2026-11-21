@@ -179,7 +179,7 @@ HELP = """Commands:
   /autotest on|off     toggle auto-test after edits
   /compile [all]       run Gradle compile check on modules of files in chat
   /modules             list detected modules and file-to-module mapping
-  /review [target]     review changes (uncommitted, staged, commits, branch, files)
+  /review [target]     review changes (uncommitted, staged, commits, branch, A..B range, files)
   /test-gen <class>    generate unit tests for a Kotlin class
   /doc <target>        add KDoc/Javadoc to Kotlin or Java declarations (class, file, folder)
   /skills              list available skills

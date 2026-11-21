@@ -100,14 +100,20 @@ def collect_material(
     if expanded:
         return _collect_files(root, expanded)
 
-    # Check if it's a branch/ref
-    if _is_git_repo(root) and _is_branch(root, target):
-        return _collect_branch(root, target)
+    if _is_git_repo(root):
+        # Commit range: "A..B", "A...B", or "A B"
+        rng = _parse_range(root, target)
+        if rng:
+            return _collect_range(root, *rng)
+        # Single branch/ref: diff vs HEAD
+        if _is_branch(root, target):
+            return _collect_branch(root, target)
 
     raise ValueError(
         f"Unknown review target: {target}\n"
         "Use: /review (uncommitted), /review staged, /review commits, "
-        "/review <branch>, or /review <file> [file]"
+        "/review <branch>, /review <from>..<to>, /review <from> <to>, "
+        "or /review <file> [file]"
     )
 
 
@@ -184,6 +190,47 @@ def _collect_branch(root: Path, branch: str) -> Tuple[str, List[str], str]:
         raise ValueError(f"No changes between {branch} and HEAD.")
     files = _extract_files_from_diff(diff)
     desc = f"changes vs {branch} ({len(files)} file{'s' if len(files) != 1 else ''})"
+    return diff.strip(), files, desc
+
+
+def _is_commit(root: Path, ref: str) -> bool:
+    if not ref or ref.startswith("-"):
+        return False
+    code, _ = _run_git(root, ["rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"])
+    return code == 0
+
+
+def _parse_range(root: Path, target: str) -> Optional[Tuple[str, str, str]]:
+    """Parse "A..B", "A...B" or "A B" into (from, to, sep). None if not a range.
+
+    Git forbids ".." in ref names, so splitting on it is unambiguous.
+    """
+    parts = target.split()
+    if len(parts) == 2:
+        a, b, sep = parts[0], parts[1], ".."
+    elif len(parts) == 1 and ".." in target:
+        sep = "..." if "..." in target else ".."
+        a, _, b = target.partition(sep)
+        b = b or "HEAD"  # "A.." means A..HEAD, like git
+    else:
+        return None
+    if not (_is_commit(root, a) and _is_commit(root, b)):
+        if len(parts) == 1:  # clearly meant as a range; say which end is bad
+            bad = a if not _is_commit(root, a) else b
+            raise ValueError(f"Unknown commit or ref: {bad or '(empty)'}")
+        return None
+    return a, b, sep
+
+
+def _collect_range(root: Path, a: str, b: str, sep: str) -> Tuple[str, List[str], str]:
+    """Diff between two commits. ".." = a vs b; "..." = merge-base(a, b) vs b."""
+    code, diff = _run_git(root, ["diff", "-U10", f"{a}{sep}{b}"], timeout=60)
+    if code != 0:
+        raise ValueError(f"git diff {a}{sep}{b} failed.")
+    if not diff.strip():
+        raise ValueError(f"No changes between {a} and {b}.")
+    files = _extract_files_from_diff(diff)
+    desc = f"changes {a}{sep}{b} ({len(files)} file{'s' if len(files) != 1 else ''})"
     return diff.strip(), files, desc
 
 

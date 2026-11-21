@@ -1,5 +1,6 @@
 """Tests for Feature 3: /review command."""
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -103,6 +104,55 @@ class TestCollectMaterial(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             collect_material(self.root, "nonexistent_branch_xyz")
         self.assertIn("Unknown review target", str(ctx.exception))
+
+    def _three_commits(self):
+        """c1: a.py=1, c2: a.py=2, c3: adds b.py. Returns (c1, c2, c3) SHAs."""
+        _git_init(self.root)
+        shas = []
+        for fname, body in (("a.py", "x = 1\n"), ("a.py", "x = 2\n"), ("b.py", "y = 1\n")):
+            (self.root / fname).write_text(body)
+            os.system(f"cd {self.root} && git add {fname} && git commit -q -m c")
+            shas.append(subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root,
+                                       capture_output=True, text=True).stdout.strip())
+        return shas
+
+    def test_commit_range_two_dot(self):
+        c1, c2, _ = self._three_commits()
+        material, files, desc = collect_material(self.root, f"{c1[:8]}..{c2[:8]}")
+        self.assertEqual(files, ["a.py"])  # b.py came later, not in range
+        self.assertIn("+x = 2", material)
+        self.assertIn(f"{c1[:8]}..{c2[:8]}", desc)
+
+    def test_commit_range_space_separated(self):
+        c1, _, c3 = self._three_commits()
+        material, files, desc = collect_material(self.root, f"{c1} {c3}")
+        self.assertEqual(sorted(files), ["a.py", "b.py"])
+
+    def test_commit_range_open_end_means_head(self):
+        _, c2, _ = self._three_commits()
+        material, files, desc = collect_material(self.root, f"{c2}..")
+        self.assertEqual(files, ["b.py"])
+
+    def test_commit_range_three_dot_uses_merge_base(self):
+        c1, c2, _ = self._three_commits()
+        os.system(f"cd {self.root} && git checkout -q -b side {c1}")
+        (self.root / "c.py").write_text("z = 1\n")
+        os.system(f"cd {self.root} && git add c.py && git commit -q -m side")
+        # side...c2 = merge-base(side, c2)=c1 vs c2 -> only a.py, not c.py
+        material, files, _ = collect_material(self.root, f"side...{c2}")
+        self.assertEqual(files, ["a.py"])
+
+    def test_commit_range_bad_ref(self):
+        c1, _, _ = self._three_commits()
+        with self.assertRaises(ValueError) as ctx:
+            collect_material(self.root, f"{c1}..deadbeefnope")
+        self.assertIn("Unknown commit or ref: deadbeefnope", str(ctx.exception))
+
+    def test_commit_range_same_commit(self):
+        c1, _, _ = self._three_commits()
+        with self.assertRaises(ValueError) as ctx:
+            collect_material(self.root, f"{c1}..{c1}")
+        self.assertIn("No changes", str(ctx.exception))
 
 
 class TestSplitMaterial(unittest.TestCase):

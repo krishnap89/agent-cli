@@ -287,6 +287,10 @@ Review code changes with a structured checklist. Works in both coder and agent.
     /review                 # uncommitted changes (git diff HEAD + untracked)
     /review staged          # staged changes (git diff --cached)
     /review main            # changes vs a branch (git diff main...HEAD)
+    /review abc123..def456  # between two commits (git diff abc123..def456)
+    /review abc123 def456   # same, space-separated
+    /review abc123..        # from a commit up to HEAD
+    /review main...feature  # feature vs its merge-base with main
     /review app.py utils.py # specific files (no git needed); globs ok
     coder --review          # one-shot from command line
     coder --review staged
