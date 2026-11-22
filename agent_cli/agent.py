@@ -202,12 +202,38 @@ def parse_tool_calls(text: str, cut_off: bool = False) -> tuple[list[dict], list
 # edit_file instead carries OLD/NEW heredoc blocks after the line, and the
 # list-valued tools (apply_patch, todo) carry a single arg=<inline JSON>.
 ACTION_LINE_RE = re.compile(r"^\s*ACTION\s+([\w.-]+)\s*(.*)$")
-# key=value pairs on an ACTION line: a value runs up to the next " key=" or EOL,
-# so values may contain spaces without quoting.
-_KV_RE = re.compile(r"(\w+)=(.*?)(?=\s+\w+=|$)")
-# Numeric args that should become ints, read from the schemas so the parser
+# Each action's arguments and their types, read from the schemas so the parser
 # stays in step with the tools.
-_INT_ARGS = {"start_line", "end_line"}
+_PARAMS = {t["name"]: {k: v.get("type") for k, v in t["input_schema"].get("properties", {}).items()}
+           for t in TOOL_SCHEMAS + JIRA_TOOL_SCHEMAS}
+# A word= that starts the text or follows a space.
+_KEY_RE = re.compile(r"(?<!\S)(\w+)=")
+
+
+def _split_args(name: str, rest: str) -> dict:
+    """Split an ACTION line's key=value text at that action's own argument names.
+
+    Any other word= is part of the value (make DESTDIR=/tmp, status=Done in JQL),
+    and so is a repeated name. run_command's command is always the whole rest of
+    the line. Raises ValueError if the text doesn't start with an argument."""
+    params = _PARAMS.get(name)
+    if params is None or not rest:
+        return {}  # nothing to split, or an unknown action that will be refused
+    first = _KEY_RE.match(rest)
+    if not first or first.group(1) not in params:
+        names = ", ".join(f"{k}=" for k in params)
+        raise ValueError(f"its arguments must start with one of {names}")
+    marks, seen = [], set()
+    for m in ([first] if name == "run_command" else _KEY_RE.finditer(rest)):
+        if m.group(1) in params and m.group(1) not in seen:
+            seen.add(m.group(1))
+            marks.append(m)
+    args = {}
+    for n, m in enumerate(marks):
+        end = marks[n + 1].start() if n + 1 < len(marks) else len(rest)
+        key, value = m.group(1), rest[m.end():end].strip()
+        args[key] = value if params[key] == "string" else _action_scalar(value)
+    return args
 
 
 CONTENT_OPEN, CONTENT_CLOSE = "<<<CONTENT", "CONTENT>>>"
@@ -258,7 +284,7 @@ def _read_write(rest: str, lines: list[str], i: int) -> tuple[dict, int]:
 
 
 def _read_edit(rest: str, lines: list[str], i: int) -> tuple[dict, int]:
-    path = (dict(_KV_RE.findall(rest)).get("path") or "").strip()
+    path = _split_args("edit_file", rest).get("path", "")
     if not path:
         raise ValueError("the ACTION line needs path=<file>")
     old, i = _read_block(lines, i, OLD_OPEN, OLD_CLOSE)
@@ -337,10 +363,11 @@ def parse_action_calls(text: str, cut_off: bool = False) -> tuple[list[dict], li
             continue
 
         # Simple tools: key=value pairs.
-        args = {}
-        for k, v in _KV_RE.findall(rest):
-            args[k] = int(v) if k in _INT_ARGS and re.fullmatch(r"-?\d+", v.strip()) \
-                else _action_scalar(v)
+        try:
+            args = _split_args(name, rest)
+        except ValueError as e:
+            errors.append(f"{name} was not run: {e}.")
+            continue
         calls.append({"name": name, "arguments": args})
         last_is_call = True
     if cut_off and last_is_call:

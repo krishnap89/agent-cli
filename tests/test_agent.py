@@ -271,6 +271,43 @@ class ParseActionCallsTest(unittest.TestCase):
         self.assertEqual(calls, [{"name": "run_command", "arguments": {
             "command": "./gradlew :app:assembleDebug --offline"}}])
 
+    def test_command_is_the_whole_rest_of_the_line(self):
+        for command in ("make clean DESTDIR=/tmp/x", "FOO=1 make A=2", "echo a command=b",
+                        "git log --format=%h  -1", "true", "42", "echo 'a  b'"):
+            with self.subTest(command=command):
+                self.assertEqual(parse_action_calls(f"ACTION run_command command={command}"), (
+                    [{"name": "run_command", "arguments": {"command": command}}], []))
+
+    def test_only_the_actions_own_names_split_values(self):
+        for line, expected in (
+            ("search pattern=val x = a b=c path=src regex=false",
+             {"pattern": "val x = a b=c", "path": "src", "regex": False}),
+            ("search path=src pattern=a b=c", {"path": "src", "pattern": "a b=c"}),
+            ("search pattern=x --path=y", {"pattern": "x --path=y"}),
+            ("jira_search jql=project = AB AND status=Done max_results=5",
+             {"jql": "project = AB AND status=Done", "max_results": 5}),
+        ):
+            with self.subTest(line=line):
+                calls, errors = parse_action_calls(f"ACTION {line}")
+                self.assertEqual((calls[0]["arguments"], errors), (expected, []))
+
+    def test_string_args_stay_strings(self):
+        for line, expected in (("search pattern=404", {"pattern": "404"}),
+                               ("search pattern=true", {"pattern": "true"}),
+                               ("list_dir path=2024", {"path": "2024"})):
+            self.assertEqual(parse_action_calls(f"ACTION {line}")[0][0]["arguments"], expected)
+
+    def test_edit_path_is_not_cut_at_an_equals_sign(self):
+        calls, _ = parse_action_calls("ACTION edit_file path=a b=c.kt\n<<<OLD\nx\nOLD\n<<<NEW\ny\nNEW")
+        self.assertEqual(calls[0]["arguments"]["path"], "a b=c.kt")
+
+    def test_text_that_is_not_an_argument_is_reported(self):
+        for line in ("list_dir src", "run_command cmd=ls", "run_command FOO=1 command=ls"):
+            with self.subTest(line=line):
+                calls, errors = parse_action_calls(f"ACTION {line}\nACTION repo_map")
+                self.assertEqual([c["name"] for c in calls], ["repo_map"])
+                self.assertIn("must start with one of", errors[0])
+
     def test_boolean_arg(self):
         calls, errors = parse_action_calls("ACTION search pattern=Login regex=true")
         self.assertEqual(errors, [])

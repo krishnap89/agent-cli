@@ -205,7 +205,8 @@ Rules:
 - Put ACTION lines and their blocks by themselves. You may emit several
   ACTION lines in one reply; each runs and its result comes back next message.
 - Values with spaces are fine: everything after the first = up to the end of the
-  line (or the next key= for simple actions) is the value. Do not add quotes.
+  line (or the next argument name of that action) is the value, so name=value
+  inside a command is fine. Do not add quotes around values.
 - Never write an action result yourself or guess what an action returns.
 - When the task is done, reply in plain prose with NO ACTION line. That ends
   your turn.
