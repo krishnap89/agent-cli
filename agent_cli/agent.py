@@ -198,7 +198,8 @@ def parse_tool_calls(text: str, cut_off: bool = False) -> tuple[list[dict], list
 # For models that return empty content for the XML <tool_call> form but will
 # happily write plain prose (e.g. Nemotron). Each tool call is a line:
 #   ACTION <tool> key=value key=value ...
-# write_file carries the file between <<<CONTENT and CONTENT>>> lines, and
+# write_file carries the file between <<<CONTENT and CONTENT>>> lines, a
+# multi-line run_command sits between <<<COMMAND and COMMAND>>> lines, and
 # edit_file instead carries OLD/NEW heredoc blocks after the line, and the
 # list-valued tools (apply_patch, todo) carry a single arg=<inline JSON>.
 ACTION_LINE_RE = re.compile(r"^\s*ACTION\s+([\w.-]+)\s*(.*)$")
@@ -214,8 +215,8 @@ def _split_args(name: str, rest: str) -> dict:
     """Split an ACTION line's key=value text at that action's own argument names.
 
     Any other word= is part of the value (make DESTDIR=/tmp, status=Done in JQL),
-    and so is a repeated name. run_command's command is always the whole rest of
-    the line. Raises ValueError if the text doesn't start with an argument."""
+    and so is a repeated name. A one-line run_command is always the whole rest
+    of the line. Raises ValueError if the text doesn't start with an argument."""
     params = _PARAMS.get(name)
     if params is None or not rest:
         return {}  # nothing to split, or an unknown action that will be refused
@@ -239,7 +240,8 @@ def _split_args(name: str, rest: str) -> dict:
 CONTENT_OPEN, CONTENT_CLOSE = "<<<CONTENT", "CONTENT>>>"
 OLD_OPEN, OLD_CLOSE = "<<<OLD", "OLD"
 NEW_OPEN, NEW_CLOSE = "<<<NEW", "NEW"
-_OPENERS = (CONTENT_OPEN, OLD_OPEN, NEW_OPEN)
+COMMAND_OPEN, COMMAND_CLOSE = "<<<COMMAND", "COMMAND>>>"
+_OPENERS = (CONTENT_OPEN, OLD_OPEN, NEW_OPEN, COMMAND_OPEN)
 
 
 def _read_block(lines: list[str], i: int, opener: str, closer: str) -> tuple[list[str], int]:
@@ -293,9 +295,120 @@ def _read_edit(rest: str, lines: list[str], i: int) -> tuple[dict, int]:
     return {"path": path, "old_str": "\n".join(old), "new_str": "\n".join(new)}, i
 
 
+def _needs_more_lines(command: str) -> str:
+    """Why a one-line shell command needs more lines, or "" if it is whole.
+
+    Running only the first line can destroy data (`cat > f <<EOF` empties f) and
+    the lines below would be read as actions. When unsure it says incomplete:
+    that costs a retry with a block, the other way round costs a file."""
+    closers = []  # what is still open, innermost last
+    top_level = []  # the command without quoted and bracketed text, for the keyword check
+    escaped = -1  # index of the last backslash-escaped character
+    i = 0
+    while i < len(command):
+        c, two = command[i], command[i:i + 2]
+        top, step = closers[-1] if closers else "", 1
+        outside = not closers
+        if top == "'":
+            if c == "'":
+                closers.pop()
+        elif c == "\\":
+            if i + 1 == len(command):
+                return "it ends in a backslash"
+            step, outside, escaped = 2, False, i + 1
+        elif top == "$'":
+            if c == "'":
+                closers.pop()
+        elif top == '"' and c == '"':
+            closers.pop()
+        elif top == "`" and c == "`":
+            closers.pop()
+        elif command.startswith("$((", i):
+            closers.append("))")
+            step = 3
+        elif two in ("$(", "${"):
+            closers.append(")" if two == "$(" else "}")
+            step = 2
+        elif c == "`":
+            closers.append("`")
+        elif top == '"':
+            pass
+        elif top == "}" and c == "}":
+            closers.pop()
+        elif top == "))" and two == "))":
+            closers.pop()
+            step = 2
+        elif two == "$'":
+            closers.append("$'")
+            step = 2
+        elif c in "'\"":
+            closers.append(c)
+        elif top == "}":
+            pass
+        elif top == "))":
+            if c == "(":
+                closers.append(")")
+        elif c == "#" and (i == 0 or (escaped != i - 1 and command[i - 1] in " \t;&|()")):
+            break  # a comment
+        elif command.startswith("<<<", i):
+            step = 3  # a here-string is one line
+        elif two == "<<":
+            return "it opens a heredoc"
+        elif two == "((":
+            closers.append("))")
+            step = 2
+        elif c == "(":
+            closers.append("()")  # a subshell or f(), unlike the ")" of $(...)
+        elif c == ")" and top in (")", "()"):
+            closers.pop()
+            outside = top == "()" and not closers
+        seen = outside and (not closers or closers == ["()"])
+        top_level.append(command[i:i + step] if seen else "Q")
+        i += step
+    if closers:
+        return "it leaves a quote or bracket open"
+
+    words = re.findall(r"&&|\|[|&]?|[;&()]|[^\s;&|()]+", "".join(top_level))
+    depth, starts = 0, True  # starts: this word begins a statement
+    for word in words:
+        if starts and word in ("if", "for", "while", "until", "case", "select", "{"):
+            depth += 1
+        elif starts and word in ("fi", "done", "esac", "}"):
+            depth -= 1
+        starts = (word in (";", "&", "&&", "|", "||", "|&", "(", ")")
+                  or (starts and word in ("if", "while", "until", "do", "then", "else", "elif",
+                                          "{", "}", "!", "time", "fi", "done", "esac"))
+                  or (depth > 0 and word == "in"))
+    if depth > 0:
+        return "it opens a block that it doesn't close"
+    if words and words[-1] in ("&&", "|", "||", "|&"):
+        return f"it ends in {words[-1]}"
+    return ""
+
+
+def _read_command(rest: str, lines: list[str], i: int) -> tuple[dict, int]:
+    if rest in ("", "command="):
+        body, i = _read_block(lines, i, COMMAND_OPEN, COMMAND_CLOSE)
+        _check_end(lines, i, COMMAND_OPEN, COMMAND_CLOSE)
+        if not "".join(body).strip():
+            raise ValueError("the command block is empty")
+        return {"command": "\n".join(body)}, i
+    args = _split_args("run_command", rest)
+    why = _needs_more_lines(args["command"])
+    following = next((line.strip() for line in lines[i:] if line.strip()), "")
+    if args["command"].startswith(COMMAND_OPEN) or following == COMMAND_OPEN:
+        why = "a block goes under a bare ACTION run_command line"
+    if why:
+        raise ValueError(f"{why}. For a command of several lines write ACTION run_command "
+                         f"alone on its line, then {COMMAND_OPEN}, the command and "
+                         f"{COMMAND_CLOSE}, each starting a line")
+    return args, i
+
+
 # Actions with blocks. Their readers raise ValueError whenever a block's end is in
 # doubt: a wrong guess saves partial code, or runs the file's own text as actions.
-_BLOCK_READERS = {"write_file": _read_write, "edit_file": _read_edit}
+_BLOCK_READERS = {"write_file": _read_write, "edit_file": _read_edit,
+                  "run_command": _read_command}
 
 
 def _action_scalar(value: str):
@@ -346,14 +459,19 @@ def parse_action_calls(text: str, cut_off: bool = False) -> tuple[list[dict], li
             last_is_call = True
             continue
 
+        if name not in _PARAMS:
+            errors.append(f"Unknown action: {name}. Nothing after it was run.")
+            break  # it may have had a body, which must not run as actions
+
         # List-valued tools: a single arg=<inline JSON>.
         if name in ("apply_patch", "todo"):
             raw = rest[rest.find("=") + 1:].strip() if "=" in rest else ""
             try:
                 value = json.loads(raw)
             except json.JSONDecodeError as e:
-                errors.append(f"Could not parse JSON arg of {name} ({e}): {raw[:200]}")
-                continue
+                errors.append(f"Could not parse JSON arg of {name} ({e}): {raw[:200]}. "
+                              "It must be one line of JSON. Nothing after it was run.")
+                break  # the lines below may be the rest of the JSON
             key = "edits" if name == "apply_patch" else "action"
             # todo's JSON carries the whole argument object; apply_patch's is the
             # edits list. Accept either an object (used as-is) or a bare value.

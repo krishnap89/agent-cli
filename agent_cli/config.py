@@ -172,6 +172,16 @@ ACTION read_file path=app/build.gradle.kts start_line=1 end_line=80
 ACTION search pattern=LoginViewModel
 ACTION run_command command=./gradlew :app:assembleDebug
 
+For a command of several lines (a heredoc, a script), write ACTION run_command
+alone on its line and put the command in a COMMAND block below it:
+
+ACTION run_command
+<<<COMMAND
+python3 - <<'EOF'
+print("hello")
+EOF
+COMMAND>>>
+
 For write_file, put only path= on the ACTION line and the whole file in a CONTENT
 block below it. Write the file as is: no escaping and no code fence. Both markers
 start at the beginning of their line.

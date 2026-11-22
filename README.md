@@ -76,6 +76,10 @@ action-response block; the text the agent sends says "action" instead of "tool".
 `<<<CONTENT` line and a `CONTENT>>>` line. If the end of the file is unclear
 (no closing marker, or a repeated one) nothing is written, nothing after it is
 run, and the model is told why. To show the markers inside a file, indent them.
+A `run_command` of several lines goes under a bare `ACTION run_command` line,
+between `<<<COMMAND` and `COMMAND>>>`, with the same rules. A one-line command
+that needs more lines (heredoc, trailing `\`, open quote) is refused, and nothing
+after it is run. The same goes for an unknown action or JSON that doesn't parse.
 `edit_file` follows the same rules for its `<<<OLD` ... `OLD` and `<<<NEW` ... `NEW`
 blocks.
 

@@ -10,7 +10,7 @@ from rich.console import Console
 
 from agent_cli import llm, playground
 from agent_cli.agent import (Agent, parse_action_calls, parse_tool_calls,
-                             strip_action_blocks, thinking_gist)
+                             strip_action_blocks, strip_thinking, thinking_gist)
 from agent_cli.config import Config
 from agent_cli.llm import Reply
 from agent_cli.skills import format_skill_context, load_skills
@@ -302,7 +302,7 @@ class ParseActionCallsTest(unittest.TestCase):
         self.assertEqual(calls[0]["arguments"]["path"], "a b=c.kt")
 
     def test_text_that_is_not_an_argument_is_reported(self):
-        for line in ("list_dir src", "run_command cmd=ls", "run_command FOO=1 command=ls"):
+        for line in ("list_dir src", "search Login"):
             with self.subTest(line=line):
                 calls, errors = parse_action_calls(f"ACTION {line}\nACTION repo_map")
                 self.assertEqual([c["name"] for c in calls], ["repo_map"])
@@ -623,6 +623,52 @@ class ScreenSafetyTest(unittest.TestCase):
             self.agent.ask("q")
         self.assertNotIn("\x1b", self.out.getvalue())
         self.assertIn("check the [/x] tag", self.out.getvalue())
+
+
+class CommandBlockTest(unittest.TestCase):
+    HEAD = "ACTION run_command\n<<<COMMAND\n"
+    BODY = "\nACTION list_dir path=.\n"
+
+    def test_block_is_verbatim(self):
+        for command in ("cat > f <<EOF\nhello\nACTION list_dir path=.\nEOF",
+                        "rm -rf \\\n  build", "echo '<think>x</think>'", "make A=1\n\nmake test"):
+            with self.subTest(command=command):
+                text = strip_thinking(Reply(f"{self.HEAD}{command}\nCOMMAND>>>", "stop", "").content,
+                                      "action")
+                self.assertEqual(parse_action_calls(text), (
+                    [{"name": "run_command", "arguments": {"command": command}}], []))
+                self.assertEqual(strip_action_blocks(text), "")
+
+    def test_one_line_that_needs_more_runs_nothing_from_there_on(self):
+        for command in ("cat > f <<EOF", "cat <<-'E'", 'echo "$(cat <<E', "rm -rf \\", 'python3 -c "',
+                        "echo $'a", "cat f |", "make &&", "a ||", "for f in *; do", "for f in *",
+                        "if true; then", "case $x in", "f() {", "cat a\\ #b <<EOF", "echo $(", "echo `date", "(cd app",
+                        "", "<<<COMMAND"):
+            with self.subTest(command=command):
+                calls, errors = parse_action_calls(
+                    f"ACTION repo_map\nACTION run_command command={command}{self.BODY}")
+                self.assertEqual([c["name"] for c in calls], ["repo_map"])
+                self.assertEqual(len(errors), 1)
+
+    def test_whole_one_line_commands_still_run(self):
+        for command in ("make test 2>&1 | tail -40", "find . -name '*.py' -exec wc -l {} \\;",
+                        "for f in *; do echo $f; done", "if true; then echo y; fi", "echo $((1<<2))",
+                        "cat <<< hi", "echo '<<EOF'", "echo done # it's fine", "{ echo a; echo b; }",
+                        "case $x in a) echo a;; esac", "echo $#", "sleep 1 &", "echo if for while",
+                        'echo "$(git log --format=\'%h\' -1)"', "awk '{print $1}' f"):
+            with self.subTest(command=command):
+                self.assertEqual(parse_action_calls(f"ACTION run_command command={command}"), (
+                    [{"name": "run_command", "arguments": {"command": command}}], []))
+
+    def test_unclear_action_runs_nothing_from_there_on(self):
+        for first in ("ACTION run_command cmd=ls", "ACTION run_command", self.HEAD + "echo hi",
+                      self.HEAD + "COMMAND>>>", "<<<COMMAND", "ACTION bash command=cat <<EOF",
+                      "ACTION run_command command=bash\n<<<COMMAND",
+                      'ACTION apply_patch arg=[{"path": "f", "new_str": "line one'):
+            with self.subTest(first=first):
+                calls, errors = parse_action_calls(first + self.BODY)
+                self.assertEqual(calls, [])
+                self.assertEqual(len(errors), 1)
 
 
 class StripActionBlocksTest(unittest.TestCase):

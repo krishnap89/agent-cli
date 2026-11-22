@@ -64,14 +64,16 @@ class _Retryable(Exception):
 
 
 # Control tokens that can appear once special tokens are kept.
-# A complete action-format write_file or edit_file block. Its body is file content,
-# so the reply clean-up (control tokens, thinking tags) must not touch it.
+# A complete action-format write_file, edit_file or run_command block. Its body is
+# literal, so the reply clean-up (control tokens, thinking tags) must not touch it.
 ACTION_BLOCK = (r"(?ms:(?:^|(?<=</think>))[ \t]*ACTION[ \t]+(?:"
                 r"write_file\b[^\n]*\n(?:[ \t\r]*\n)*"
                 r"[ \t]*<<<CONTENT[ \t\r]*\n.*?^CONTENT>>>[ \t\r]*$"
                 r"|edit_file\b[^\n]*\n(?:[ \t\r]*\n)*"
                 r"[ \t]*<<<OLD[ \t\r]*\n.*?^OLD[ \t\r]*\n(?:[ \t\r]*\n)*"
-                r"[ \t]*<<<NEW[ \t\r]*\n.*?^NEW[ \t\r]*$))")
+                r"[ \t]*<<<NEW[ \t\r]*\n.*?^NEW[ \t\r]*$"
+                r"|run_command\b[^\n]*\n(?:[ \t\r]*\n)*"
+                r"[ \t]*<<<COMMAND[ \t\r]*\n.*?^COMMAND>>>[ \t\r]*$))")
 # finish_reason values of a reply that ended early. "incomplete" is ours: the
 # stream closed with neither a finish_reason nor [DONE].
 CUT_OFF_REASONS = ("length", "max_tokens", "incomplete")
