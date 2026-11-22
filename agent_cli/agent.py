@@ -5,6 +5,7 @@ import time
 from rich.console import Console
 from rich.markdown import Markdown
 
+from .checks import relative_paths
 from .config import (ACTION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION,
                      Config, SYSTEM_PROMPT)
 from .llm import LLMError, chat
@@ -327,7 +328,6 @@ class Agent:
             template = (ACTION_SYSTEM_PROMPT if self.cfg.tool_format == "action"
                         else SYSTEM_PROMPT)
             system = template.format(
-                workdir=self.cfg.workdir,
                 tool_docs=render_tool_docs(self.cfg),
                 repo_map_section=self._repo_map_section(),
             )
@@ -521,7 +521,7 @@ class Agent:
         try:
             output = self.tools.run(name, args)
         except (ToolError, OSError, TypeError) as e:
-            output = f"Error: {e}"
+            output = relative_paths(f"Error: {e}", self.tools.root)
             console.print(f"[red]{output}[/red]")
         else:
             console.print(f"  [dim]{self._summarize(name, output)}[/dim]")

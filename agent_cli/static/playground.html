@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-playground</title>
+<link rel="icon" href="data:,">
+<style>
+/* same tokens as index.html */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff; --surface: #f5f5f5; --border: #d4d4d4; --text: #1a1a1a; --dim: #626262;
+  --accent: #2563eb; --red: #c62323; --warn: #8a5a00;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f0f0f; --surface: #1a1a1a; --border: #333333; --text: #e5e5e5; --dim: #999999;
+    --accent: #2563eb; --red: #f87171; --warn: #eab308;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+body { margin: 0; height: 100vh; display: flex; flex-direction: column;
+  background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, sans-serif; }
+header { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 10px 16px; border-bottom: 1px solid var(--border); }
+header span, .meta, .hint { color: var(--dim); overflow-wrap: anywhere; }
+main { flex: 1; min-height: 0; display: grid; grid-template-columns: 360px minmax(0, 1fr); }
+form { overflow: auto; padding: 12px 16px; background: var(--surface); border-right: 1px solid var(--border); }
+label { display: block; margin-bottom: 10px; font-weight: 500; }
+input, textarea, select, button { font: inherit; }
+input:not([type=checkbox]), textarea, select { display: block; width: 100%; margin-top: 3px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--text); }
+textarea { resize: vertical; }
+.row { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+.hint { font-size: 12px; font-weight: normal; }
+.actions { position: sticky; bottom: -12px; display: flex; gap: 8px; padding: 10px 0; background: var(--surface); }
+button { padding: 7px 14px; border: 1px solid var(--border); border-radius: 4px;
+  background: var(--bg); color: var(--text); cursor: pointer; }
+button:disabled { opacity: .5; cursor: default; }
+#send { flex: 1; background: var(--accent); border-color: var(--accent); color: #fff; }
+form details { margin-bottom: 10px; }
+summary { cursor: pointer; padding: 4px 0; }
+#results { overflow: auto; display: grid; align-items: start; align-content: start; gap: 12px; padding: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); }
+article { min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; }
+h2 { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+pre { margin: 6px 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.5 ui-monospace, Menlo, monospace; }
+article details { border-top: 1px solid var(--border); }
+article details pre { max-height: 360px; overflow: auto; }
+.error { color: var(--red); }
+.warn { color: var(--warn); }
+@media (max-width: 720px) {
+  body { height: auto; }
+  main { display: block; }
+  form { border-right: 0; border-bottom: 1px solid var(--border); }
+}
+</style>
+</head>
+<body>
+<header><strong>agent-playground</strong><span id="server">loading...</span><span id="status" role="status"></span></header>
+<main>
+  <form id="form">
+    <label>Models <span class="hint">comma-separated, up to 4</span><input id="models" required></label>
+    <label id="picker" hidden>Add a model from the server<select id="available"></select></label>
+    <label>System prompt preset
+      <select id="preset">
+        <option value="none">None</option>
+        <option value="chat">Chat (agent --chat)</option>
+        <option value="agent">Agent with tools (no repo map)</option>
+      </select>
+    </label>
+    <label>System prompt<textarea id="system" rows="4"></textarea></label>
+    <label>User prompt <span class="hint">&#8984;/Ctrl + Enter sends</span><textarea id="user" rows="7" required></textarea></label>
+    <div class="row">
+      <label>Temperature<input id="temperature" type="number" step="any" required></label>
+      <label>Max tokens<input id="max_tokens" type="number" min="1" required></label>
+      <label>Thinking
+        <select id="thinking"><option value="">Server default</option><option value="0">Off</option><option value="1">On</option></select>
+      </label>
+      <label><input id="stream" type="checkbox"> Stream</label>
+    </div>
+    <details>
+      <summary>Advanced</summary>
+      <label>Stop sequences <span class="hint">one per line</span><textarea id="stop" rows="2"></textarea></label>
+      <label>Extra JSON <span class="hint">sent as-is, not masked</span><textarea id="extra_body" rows="3" placeholder='{"top_p": 0.8}'></textarea></label>
+      <label><input id="keep_special_tokens" type="checkbox"> Keep special tokens (vLLM)</label>
+    </details>
+    <div class="actions">
+      <button id="send" disabled>Send</button>
+      <button id="cancel" type="button" disabled>Stop</button>
+    </div>
+  </form>
+  <section id="results" aria-label="Responses"><p class="hint">Responses appear here.</p></section>
+</main>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const token = new URLSearchParams(location.search).get("token") || "";
+const api = path => `${path}?token=${encodeURIComponent(token)}`;
+const pretty = value => JSON.stringify(value, null, 2);
+let config = null;
+let controller = null;
+
+// Model output is untrusted: it only ever goes in through textContent or text nodes.
+function el(parent, tag, text = "", cls = "") {
+  const node = parent.appendChild(document.createElement(tag));
+  node.textContent = text;
+  node.className = cls;
+  return node;
+}
+
+function card(model) {
+  const root = el($("results"), "article");
+  el(root, "h2", model);
+  const meta = el(root, "div", "waiting...", "meta");
+  const notes = el(root, "div");
+  const reply = el(root, "pre");
+  const section = (title, open = false) => {
+    const box = el(root, "details");
+    box.hidden = true;
+    box.open = open;
+    el(box, "summary", title);
+    const body = el(box, "pre");
+    return {
+      open() { box.open = true; },
+      set(text) { body.textContent = text; box.hidden = !text; },
+      add(text) { body.append(text); box.hidden = false; },
+    };
+  };
+  return {
+    meta, notes, reply,
+    thinking: section("Thinking"),
+    tools: section("Tool calls parsed (not run)", true),
+    native: section("Native tool calls from server (not run)", true),
+    cleaned: section("Text the agent keeps"),
+    request: section("Request sent"),
+    raw: section("Raw response"),
+  };
+}
+
+function show(view, event) {
+  if (event.type === "request") view.request.set(pretty(event.body));
+  if (event.type === "delta") {
+    view.meta.textContent = event.kind === "content" ? "writing..." : event.kind === "thinking" ? "thinking..." : "calling a tool...";
+    if (event.kind === "content") view.reply.append(event.text);
+    if (event.kind === "thinking") view.thinking.add(event.text);
+  }
+  if (event.type === "error") {
+    view.meta.textContent = `failed after ${event.total_ms} ms`;
+    el(view.notes, "div", event.text, "error");
+    view.raw.set(event.raw);
+    view.raw.open();
+  }
+  if (event.type === "done") {
+    const facts = [`${event.total_ms} ms`];
+    if (event.first_ms !== null) facts.push(`first output ${event.first_ms} ms`);
+    if (event.usage.prompt_tokens !== undefined) facts.push(`${event.usage.prompt_tokens} tokens in`);
+    if (event.usage.completion_tokens !== undefined) facts.push(`${event.usage.completion_tokens} tokens out`);
+    facts.push(`finish: ${event.finish || "none"}`);
+    view.meta.textContent = facts.join(" · ");
+    for (const warning of event.warnings) el(view.notes, "div", warning, "warn");
+    view.reply.textContent = event.content;
+    view.thinking.set(event.reasoning);
+    view.tools.set(event.tool_calls.length ? pretty(event.tool_calls) : "");
+    view.native.set(event.native_tool_calls.length ? pretty(event.native_tool_calls) : "");
+    view.cleaned.set(event.cleaned);
+    let raw = event.raw;
+    try { raw = pretty(JSON.parse(raw)); } catch { /* event stream, not JSON */ }
+    view.raw.set(raw);
+  }
+}
+
+async function request(body, view, signal) {
+  let ended = false;
+  try {
+    const response = await fetch(api("/api/run"), { method: "POST", body: JSON.stringify(body), signal });
+    if (!response.ok) throw new Error((await response.json()).error);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let pending = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      pending += decoder.decode(value, { stream: true });
+      const lines = pending.split("\n");
+      pending = lines.pop();
+      for (const line of lines) {
+        const event = JSON.parse(line);
+        show(view, event);
+        ended = ended || event.type === "done" || event.type === "error";
+      }
+    }
+    if (!ended) throw new Error("Playground connection closed early");
+  } catch (error) {
+    view.meta.textContent = signal.aborted ? "stopped" : "failed";
+    if (!signal.aborted) el(view.notes, "div", error.message, "error");
+  }
+}
+
+$("form").onsubmit = async event => {
+  event.preventDefault();
+  if (!config || controller) return;
+  const models = $("models").value.split(",").map(name => name.trim()).filter(Boolean);
+  if (!models.length || models.length > 4) {
+    $("status").textContent = "Enter 1 to 4 models.";
+    return;
+  }
+  const body = {};
+  for (const id of ["system", "user", "temperature", "max_tokens", "thinking", "stop", "extra_body"]) body[id] = $(id).value;
+  for (const id of ["stream", "keep_special_tokens"]) body[id] = $(id).checked;
+
+  controller = new AbortController();
+  $("send").disabled = true;
+  $("cancel").disabled = false;
+  $("status").textContent = "Running...";
+  $("results").replaceChildren();
+  await Promise.all(models.map(model => request({ ...body, model }, card(model), controller.signal)));
+  controller = null;
+  $("send").disabled = false;
+  $("cancel").disabled = true;
+  $("status").textContent = "";
+};
+
+$("cancel").onclick = () => controller?.abort();
+$("preset").onchange = () => {
+  const preset = config?.presets[$("preset").value];
+  if (!preset) return;
+  $("system").value = preset.system;
+  $("stop").value = preset.stop;
+};
+$("available").onchange = () => {
+  const names = $("models").value.split(",").map(name => name.trim()).filter(Boolean);
+  names.push($("available").value);
+  $("models").value = names.join(", ");
+  $("available").value = "";
+};
+document.onkeydown = event => {
+  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    event.preventDefault();
+    $("form").requestSubmit();
+  }
+};
+
+(async () => {
+  try {
+    const response = await fetch(api("/api/config"));
+    if (!response.ok) throw new Error((await response.json()).error);
+    config = await response.json();
+    $("models").value = config.model;
+    for (const id of ["temperature", "max_tokens", "thinking", "extra_body"]) $(id).value = config[id];
+    for (const id of ["stream", "keep_special_tokens"]) $(id).checked = config[id];
+    $("server").textContent = `${config.base_url} · tool format: ${config.tool_format} · masking ${config.masking ? "on" : "OFF"}`;
+    $("send").disabled = false;
+
+    const listed = await (await fetch(api("/api/models"))).json();
+    if (listed.error) $("status").textContent = `Can't list models: ${listed.error}`;
+    if (listed.models.length) {
+      $("available").add(new Option("Choose...", ""));
+      for (const name of listed.models) $("available").add(new Option(name, name));
+      $("picker").hidden = false;
+    }
+  } catch (error) {
+    $("status").textContent = `Could not load: ${error.message}`;
+  }
+})();
+</script>
+</body>
+</html>

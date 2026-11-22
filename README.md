@@ -545,6 +545,29 @@ Features:
 Security: binds to 127.0.0.1 only, uses a random session token in the URL
 to prevent other websites from calling the API.
 
+## Playground (`agent-playground`)
+A local page for checking what the model returns, using the same HTTP client,
+masking and reply parsing as the CLI. It never runs tools or edits files.
+
+    agent-playground                        # uses your AGENT_* settings / .env
+    agent-playground -u http://gpu-box:8000/v1 -m qwen
+    python -m agent_cli.playground          # without re-running pip install
+
+- Edit the system prompt (or load the chat / agent preset), user prompt, sampling
+  options, stop sequences, streaming, thinking and extra JSON.
+- Send one prompt to up to 4 models side by side; repeat a name to check consistency.
+- For each reply: time to first output, total time, token usage (when the server
+  reports it), finish reason, thinking, the text the agent would keep, the tool
+  calls it would parse, the request body as sent and the raw response.
+- Warnings for empty replies, truncation and tool calls that don't parse.
+
+Requests are not retried, so you see the server's first answer or error. The
+agent preset leaves out the repo map and project notes. Messages are masked as
+usual; the extra JSON field is sent as-is. When streaming, add
+`{"stream_options": {"include_usage": true}}` if token usage is missing.
+Same security model as agent-ui: 127.0.0.1 only, random token, and the API key
+stays in the Python process.
+
 ## Repo map
 Both commands index the codebase into a ranked outline (files, classes,
 functions, line numbers). See it with `agent --map "query"` or /map in either
