@@ -72,6 +72,8 @@ class JiraPlanOrchestrator:
         console.print(f"[bold]{fields['key']}[/bold]: {fields['summary']} "
                       f"[dim]({fields['status'] or 'no status'})[/dim]")
         request = _issue_to_request(fields)
+        from .. import redact
+        redact.note_untrusted(request, "jira")
 
         # Locate the code the ticket concerns. Reuses presearch + Locator + the
         # relevance gate; returns [] (with a printed reason) if nothing matches.

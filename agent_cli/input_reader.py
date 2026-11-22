@@ -157,6 +157,15 @@ def read_message(prompt: str, erase: bool = False) -> str:
     where the input method allows it (prompt_toolkit, single message). Check
     was_erased() afterwards to know whether it was.
     """
+    text = _read_message(prompt, erase)
+    # A long message is almost always pasted (a log, a ticket, a data dump):
+    # strict masking mode has the local PII model look it over before sending.
+    from . import redact
+    redact.note_untrusted(text, "paste")
+    return text
+
+
+def _read_message(prompt: str, erase: bool = False) -> str:
     global _last_erased
     _last_erased = False
     if _pt_available and _completer is not None and sys.stdin.isatty():

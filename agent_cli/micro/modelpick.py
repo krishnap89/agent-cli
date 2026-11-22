@@ -23,7 +23,11 @@ if TYPE_CHECKING:
 # pipeline uses Locator/Planner/Editor/Fixer/Reviewer/Summarizer; the read-only
 # analysis pipeline uses Locator/Analyst/Diagrammer/Writer.
 ROLES = ("Locator", "Planner", "Editor", "Fixer", "Reviewer", "Summarizer",
-         "Keyworder", "RelevanceGate", "Analyst", "Diagrammer", "Writer")
+         "Keyworder", "RelevanceGate", "Analyst", "Diagrammer", "Writer",
+         # Not a pipeline role: the local model redact.py asks in strict mode
+         # (AGENT_REDACT_STRICT=1) to list personal data. Used whether or not
+         # AGENT_AUTO_MODEL is on.
+         "PII")
 
 # Fallback key: a model under this name in the map applies to every role the map
 # does not name explicitly.

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 import typer
 
+from . import redact
 from .config import Config, UNLIMITED_CHARS, parse_context_chars
 from .coder import Coder
 from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
@@ -117,6 +118,8 @@ class WebCoder:
                         rel = self.coder._rel(m)
                     except ValueError:
                         continue
+                    if redact.check_file(self.coder.root, rel):
+                        continue  # keystores, keys, .agentignore: never sent
                     self.coder.editable.pop(rel, None)
                     self.coder.read_only.pop(rel, None)
                     target[rel] = None
@@ -192,6 +195,7 @@ class WebCoder:
         old_mode = self.coder.mode
         self.coder.mode = mode
 
+        redact.note_untrusted(user_text, "paste")
         self.coder.history.append({"role": "user", "content": user_text})
         messages = self.coder.build_messages(user_text)
 
@@ -709,7 +713,8 @@ def main(
     workdir: Path = typer.Option(Path.cwd(), "--workdir", "-w", help="Project directory"),
 ):
     """Start the web UI for the coder."""
-    cfg = Config(workdir=workdir)
+    cfg = Config(workdir=workdir.resolve())
+    redact.startup_notice(cfg)
     web_coder = WebCoder(cfg)
 
     token = secrets.token_urlsafe(32)

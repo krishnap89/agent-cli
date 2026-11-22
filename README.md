@@ -28,7 +28,7 @@ Env: AGENT_BASE_URL, AGENT_MODEL, AGENT_API_KEY, AGENT_MAX_TOKENS,
 AGENT_TEMPERATURE, AGENT_TIMEOUT, AGENT_MAX_TURNS,
 AGENT_DEBUG=1 (print raw server responses),
 AGENT_HTTP_LOG=<path> (append every HTTP request and reply to that file, bearer
-token redacted; unset = off), AGENT_STREAM (default 1),
+token redacted, secrets masked; unset = off), AGENT_STREAM (default 1),
 AGENT_RETRIES (default 3, retries 429/502/503/504).
 AGENT_KEEP_SPECIAL_TOKENS (default 1: sends vLLM `skip_special_tokens: false`, so
 Qwen's `<tool_call>` markup isn't stripped; set 0 for servers that reject it),
@@ -40,7 +40,9 @@ AGENT_MODEL_MAP (JSON {role: model}; roles are Locator, Planner, Editor, Fixer,
 Reviewer, Summarizer, e.g.
 '{"Editor":"code-model","Fixer":"code-model","Planner":"reason-model","Locator":"fast-model","Reviewer":"review-model"}';
 a "default" key sets the model for any unnamed role, else such roles use
-AGENT_MODEL).
+AGENT_MODEL; a "pii" key names the local model used by strict masking).
+AGENT_REDACT (default 1; 0 turns masking off), AGENT_REDACT_PII (default 0),
+AGENT_REDACT_STRICT (default 0): see "Masking secrets and personal data".
 See sections below for AGENT_LINT_*, AGENT_TEST_*, AGENT_NOTES_*,
 AGENT_DOC_*, AGENT_JIRA_* (read-only Jira), and
 AGENT_CHECK_OUTPUT_CHARS / AGENT_MAX_FIX_ATTEMPTS.
@@ -242,6 +244,105 @@ break the work into small, ordered subtasks, each naming the files it would
 touch. It prints the plan and stops — no source is edited, no document is
 written, and nothing is sent back to Jira. Implement a step afterwards with
 `/micro`.
+
+## Masking secrets and personal data
+Before anything is sent to the model, secrets (and optionally personal data)
+are replaced with placeholders; the reply is restored before you or the code
+see it. This happens in one place (llm.py), so it covers every request: agent,
+coder, `/micro` roles, `/review`, `/doc`, `/test-gen`, Jira tickets and the web UI.
+
+    password = "hunter2"   is sent as   password = "[REDACTED_PASSWORD_1]"
+
+- Only the value is replaced. The same value always gets the same placeholder
+  for the whole session, so prompts stay stable (prefix caching still works).
+- Replies are unmasked, including streamed text (a placeholder split across
+  chunks is held back until it is complete), reasoning, and tool-call
+  arguments. A SEARCH/REPLACE block or `edit_file` call written around a
+  placeholder therefore edits the real file with the real value.
+- The value/placeholder mapping lives in memory only. Real values are never
+  written to disk: the HTTP log (`AGENT_HTTP_LOG`), `AGENT_DEBUG` output and the
+  `/micro` run logs in `.agent-cache/runs/` contain placeholders.
+- After each request a dim line says what was masked, never the values:
+  `masked before sending: 2 passwords, 1 email`.
+
+**Secrets (always on):** private key blocks; AWS, GitHub, GitLab, Slack,
+Google (`AIza…`), Stripe, Atlassian (`ATATT…`) and LLM API keys (OpenAI,
+Anthropic, Hugging Face, Groq, …); JWTs; passwords in URLs; `Authorization`
+headers; quoted values assigned to secret-like names (`password`, `secret`,
+`token`, `api_key`, `client_secret`, `credentials`, …, also `dbPassword`,
+`AUTH_TOKEN`); unquoted values in `.env`, `.properties`, YAML and `key=value`
+log lines; Android `storePassword`/`keyPassword` and secret `buildConfigField`s.
+Not masked: type names (`password: String`), `${VAR}`, `$VAR`, `<...>`,
+`****`, `changeme` and other obvious dummies, and allowlisted values.
+
+**Personal data (off by default; `AGENT_REDACT_PII=1` or `"pii": true`):**
+each match is validated and scored, and only matches at or above the threshold
+(default 0.5) are masked.
+- email (not example.com/.org/.net or test domains), card numbers (Luhn),
+  IBAN (country length + mod-97), phone numbers (international and German
+  formats, plausible length), German tax ID (checksum), IPv4/IPv6 (not
+  private/loopback).
+- Words near a match raise or lower its score: `Tel`, `IBAN`, `Kontonummer`,
+  `email` raise it; `version`, `timestamp`, `id` lower it.
+- Structured data: values of fields named email, phone, iban, birth_date,
+  address, first_name, last_name (and variants) in JSON, YAML, CSV, SQL
+  `INSERT` dumps and `key=value` logs.
+- Names and cities listed one per line in `.agent/redact-names.txt`.
+- Test data is left alone: files under `src/test`, `src/androidTest`,
+  `fixtures` (plus `allow_paths`) keep their personal data; secrets in them are
+  still masked.
+- **Strict mode** (`AGENT_REDACT_STRICT=1` or `"strict": true`, implies PII):
+  logs (`/run` output, check failures, `run_command`), Jira tickets and pasted
+  text over 500 characters are also shown, already rule-masked, to a local
+  model, which lists the personal data it sees; those values are masked too.
+  The model is the `pii` entry of `AGENT_MODEL_MAP` (e.g.
+  `'{"pii": "qwen2.5-3b-instruct"}'`), else its `default`, else `AGENT_MODEL`
+  (with a warning, since that is the main model). `AGENT_REDACT_PII_URL` (or
+  `"pii_base_url"` in the config) sends the check to a separate local server.
+  It only adds to the rule-based detection: if the model fails you get a
+  warning, the rules still apply, and the unchecked texts are retried a
+  minute later.
+
+**Files.** Some files are never sent. `/add`, `/read`, `read_file`, `search`
+results, `run_command` (when the command names one), `@mentions`, `/review`
+(including diffs), `/doc`, `/test-gen` sources, the repo map and the web UI
+refuse them with a clear message, and llm.py withholds any that still turn up
+embedded in a prompt (even with `AGENT_REDACT=0`):
+- `*.jks`, `*.keystore`, `*.p12`, `*.pfx`, `*.pem`, `*.key`, `*.ppk`, SSH
+  private keys (`id_rsa`, `id_ed25519`, …), and any file that starts with a
+  private key block;
+- anything matched by `.agentignore` in the project root (gitignore syntax:
+  `*`, `**`, `dir/`, `!negation`).
+
+These are sent masked, with a one-time warning: `.env*`, `local.properties`,
+`gradle.properties`, `keystore.properties`, `secrets.properties`,
+`signing.properties`, `google-services.json`, `GoogleService-Info.plist`,
+`.netrc`, `.npmrc`, `.pypirc`.
+
+**Config** in `<project>/.agent/redact.json` (all keys optional):
+
+    {
+      "pii": true,
+      "strict": false,
+      "threshold": 0.5,
+      "allow": ["demo-password-for-docs"],
+      "allow_paths": ["**/sampledata/**"],
+      "pii_base_url": "http://localhost:11434/v1",
+      "patterns": [{"name": "internal_token", "regex": "itk_([A-Za-z0-9]{24})", "group": 1}]
+    }
+
+`allow` values are never masked; `allow_paths` are extra test-data paths;
+`patterns` add secret rules (`group` picks the part to mask, default the whole
+match). The env vars override the file. `AGENT_REDACT=0` turns masking off and
+prints a warning at startup; blocked files stay blocked.
+
+**Check before you send:** `agent scan <files|globs|dirs>` lists, per line,
+what would be masked (kind, rule, score, and only the first 4 characters of
+each value) and each file's policy (blocked, sent masked, test data):
+
+    agent scan .env app/src/main/**/*.kt --pii
+    .env: sent masked (warning) (may contain secrets; sent masked)
+          3  PASSWORD         supe…    (assignment_line)
 
 ## Project notes
 Create an AGENT.md (or CONVENTIONS.md, .agent/notes.md) in your project root

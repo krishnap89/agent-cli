@@ -1,0 +1,75 @@
+# Fake secrets and personal data for test_redact.py. None of these are real.
+# Every "§" is removed by the test before use: it keeps token-shaped strings
+# out of the repository so secret scanners (GitHub push protection) stay quiet.
+
+## private keys
+-----BEGIN RSA PRIV§ATE KEY-----
+MIIEowIBAAKCAQEAfakefakefakefakefakefakefakefakefakefakefakefake
+Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6cXV4Zm9vYmFyYmF6
+-----END RSA PRIV§ATE KEY-----
+-----BEGIN OPENSSH PRIV§ATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABFAKEFAKE
+-----END OPENSSH PRIV§ATE KEY-----
+
+## cloud and SaaS tokens
+aws_access_key_id = AK§IAIOSFODNN7EXAMPLE
+aws_secret_access_key = wJa§lrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+github: gh§p_FAKEaaaaBBBBccccDDDDeeeeFFFFgggg1234
+fine_grained: github§_pat_11FAKEFAKE0123456789_abcdefghijklmnopqrstuvwxyz
+gitlab: gl§pat-FAKEfake1234567890ab
+slack: xo§xb-1234567890-FAKEFAKEFAKE
+webhook: https://hooks.sl§ack.com/services/T00FAKE00/B00FAKE00/FAKEfakeFAKEfake1234
+google: AI§zaSyFAKE_fake-FAKEfakeFAKEfakeFAKE123
+stripe: sk§_test_FAKEfakeFAKEfake1234567890
+atlassian: AT§ATT3xFfGF0FAKEfakeFAKEfake-1234567890
+openai: sk§-proj-FAKEfakeFAKEfakeFAKEfake1234
+anthropic: sk§-ant-api03-FAKEfakeFAKEfakeFAKEfake
+jwt: ey§JhbGciOiJIUzI1NiJ9.ey§JzdWIiOiIxMjM0NTY3ODkwIn0.FAKEsignatureFAKEsig
+
+## URLs and headers
+DATABASE_URL=postgres://admin:Pg5ecret42@db.internal.corp:5432/app
+Authorization: Basic dXNlcjpGQUtFcGFzcw==
+curl -H "Authorization: Bearer FAKEbearerTOKEN1234567890"
+
+## assignments in code and config
+{"client_secret": "cs-FAKE-9f8e7d6c5b"}
+val apiKey = "kotlinFakeKey123"
+db_password = 'pyFakePass!9'
+DB_PASSWORD=envFakePass77
+export API_TOKEN=envFakeToken88
+storePassword=propsStorePw1
+keyPassword=propsKeyPw2
+password: yamlFakePass3
+    storePassword 'groovyStorePw4'
+buildConfigField("String", "MAPS_API_KEY", "\"mapsFakeKey5\"")
+
+## must NOT be masked
+password: String
+token = ${API_TOKEN}
+secret = $SECRET_FROM_ENV
+apiKey = "<your-api-key>"
+password = "****"
+password = "changeme"
+token = "allowedTestToken"
+
+## personal data (only with PII on)
+Contact: max.mustermann@firma-beispiel.de, docs: info@example.com
+Kreditkarte 4539 1488 0343 6467
+IBAN: DE89 3704 0044 0532 0130 00 / GB82 WEST 1234 5698 7654 32
+Mobile: +49 170 1234567, US office +1 (415) 555-0132
+Tel.: 030 12345678
+Handy 0151 23456789
+Steuer-ID: 86095742719
+client ip 85.214.132.117 and ipv6 2a00:1450:4001:82a::200e
+{"first_name": "Erika", "last_name": "Mustermann", "birth_date": "1964-08-12", "address": "Heidestrasse 17, 51147 Koeln"}
+email,phone,first_name
+anna.schmidt@firma-beispiel.de,+49 151 99887766,Anna
+INSERT INTO users (id, first_name, email) VALUES (1, 'Lukas', 'lukas.weber@firma-beispiel.de');
+customer:
+  last_name: Hoffmann
+Meeting with Jonas Becker tomorrow.
+
+## personal-data look-alikes that must stay
+version 1.2.3.4
+timestamp 1700000000000
+localhost 127.0.0.1

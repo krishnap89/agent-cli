@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from . import redact
 from .checks import truncate_output
 
 REVIEW_SYSTEM = """You are an expert code reviewer. Review ONLY the changes shown.
@@ -86,6 +87,14 @@ def collect_material(
     Returns (material_text, list_of_file_paths, description).
     Raises ValueError on errors (not a git repo, unknown target, etc.).
     """
+    material, files, desc = _collect(root, target)
+    # Never send keystores, private keys or .agentignore'd files, even as a diff.
+    material, refused = redact.filter_diff(material, root)
+    files = [f for f in files if f not in refused]
+    return material, files, desc
+
+
+def _collect(root: Path, target: str) -> Tuple[str, List[str], str]:
     target = target.strip()
 
     if not target:
@@ -157,6 +166,8 @@ def _collect_uncommitted(root: Path) -> Tuple[str, List[str], str]:
         if not line:
             continue
         path = root / line
+        if redact.check_file(root, line):
+            continue  # blocked: not even its name's content goes out
         if path.is_file() and not _is_binary(path):
             try:
                 content = path.read_text(encoding="utf-8", errors="replace")
@@ -299,6 +310,10 @@ def _collect_files(root: Path, file_list: List[str]) -> Tuple[str, List[str], st
     parts = []  # type: List[str]
     for rel in file_list:
         path = root / rel
+        refused = redact.check_file(root, rel)
+        if refused:
+            parts.append(refused)
+            continue
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
