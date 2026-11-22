@@ -24,7 +24,7 @@ from typing import Callable, Dict, List, Optional
 from rich.console import Console
 from rich.markup import escape
 
-from .. import redact
+from .. import redact, textfile
 from ..editblock import unified_diff
 from ..mathtext import plain_math
 from ..risk import CheckFacts, callers_not_updated, is_graph_file, risk_note
@@ -227,6 +227,8 @@ class MicroOrchestrator:
     def _locate_and_plan(self, request: str) -> Optional[List[PlanStep]]:
         fast = self._fast_path_file(request)
         if fast is not None:
+            if not self._all_editable([fast]):
+                return None
             console.print(f"[dim]Fast path: editing {fast} (skipping Locator and Planner)[/dim]")
             return [PlanStep(summary=request, files=[fast])]
 
@@ -249,6 +251,8 @@ class MicroOrchestrator:
         if not files:
             console.print("[yellow]Locator found no files to edit or create.[/yellow]")
             return None
+        if not self._all_editable(files):
+            return None
         for f in files:
             # Create the file ourselves (empty) so coder.add never has to prompt
             # for it; the Editor then fills it with an empty-SEARCH block.
@@ -269,6 +273,16 @@ class MicroOrchestrator:
             return None
         console.print(f"[dim]{len(steps)} step(s) planned.[/dim]")
         return steps
+
+    def _all_editable(self, files: List[str]) -> bool:
+        """Checked before any edit, as a plan missing one of its files is half a change."""
+        ok = True
+        for f in files:
+            why = textfile.problem(self.root / f)
+            if why:
+                console.print(f"[red]Can't edit {escape(f)}: {escape(why)}. Nothing was changed.[/red]")
+                ok = False
+        return ok
 
     def _validate_steps(self, steps: List[PlanStep], located: List[str],
                         request: str) -> List[PlanStep]:
@@ -452,10 +466,9 @@ class MicroOrchestrator:
             console.print(f"[yellow]Reviewer flagged: {plain_math(notes or '(no note)')}[/yellow]")
         return ok, notes
 
-    # ---- finish: undo snapshot + Summarizer ----
+    # ---- finish: diffs + Summarizer ----
 
     def _finish(self, request: str, changed: Dict[str, Optional[str]]) -> None:
-        self.coder.undo_stack.append(changed)
         self.coder.last_diffs = []
         all_diffs = []
         for rel, old in changed.items():

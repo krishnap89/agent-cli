@@ -22,6 +22,7 @@ from typing import Callable, Dict, List, Optional
 
 from rich.console import Console
 
+from .. import textfile
 from ..editblock import unified_diff
 from .loop import RunLogger
 from .modelpick import model_for
@@ -388,13 +389,17 @@ class AnalysisOrchestrator:
         rel = self._output_path(request)
         p = self.root / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else None
         body = document if document.endswith("\n") else document + "\n"
-        p.write_text(body, encoding="utf-8")
-
+        try:
+            old = textfile.read(p) if p.exists() else None
+            data = textfile.encode(p, body)
+        except textfile.NotEditable as e:
+            console.print(f"[red]Can't write {rel}: {e}.[/red]")
+            return False
         # One undo snapshot for the whole run, same shape the edit pipeline uses.
-        changed: Dict[str, Optional[str]] = {rel: old}
-        self.coder.undo_stack.append(changed)
+        changed: Dict[str, Optional[str]] = {}
+        self.coder._save_undo(changed, rel, old)
+        p.write_bytes(data)
         self.coder.last_diffs = []
         d = unified_diff(rel, old or "", body)
         if d:

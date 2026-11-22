@@ -25,6 +25,8 @@ import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from . import textfile
+
 HEAD_RE = re.compile(r"^\s*<{5,9} ?SEARCH\b.*$")
 DIVIDER_RE = re.compile(r"^\s*={5,9}\s*$")
 UPDATED_RE = re.compile(r"^\s*>{5,9} ?REPLACE\b.*$")
@@ -62,7 +64,7 @@ def _clean_filename(line: str) -> Optional[str]:
 
 def parse_edit_blocks(text: str, default_path: Optional[str] = None) -> Tuple[List[EditBlock], List[str]]:
     """Find all SEARCH/REPLACE blocks. Returns (blocks, problems)."""
-    lines = text.splitlines()
+    lines = textfile.lines(text)
     blocks, problems = [], []
     last_path = default_path
     i = 0
@@ -126,9 +128,9 @@ def apply_edit(content: str, search: str, replace: str) -> str:
     if search in content:
         return content.replace(search, replace, 1)
 
-    c_lines = content.splitlines()
-    s_lines = search.splitlines()
-    r_lines = replace.splitlines()
+    c_lines = textfile.lines(content)
+    s_lines = textfile.lines(search)
+    r_lines = textfile.lines(replace)
     while s_lines and not s_lines[0].strip():  # drop stray blank lines at the edges
         s_lines.pop(0)
     while s_lines and not s_lines[-1].strip():

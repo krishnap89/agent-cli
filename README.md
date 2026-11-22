@@ -21,7 +21,8 @@ system prompt and the agent parses `<tool_call>` blocks from plain text.
     agent -c "explain Python decorators"
     agent -u http://gpu-box:8000/v1 -m qwen -y "run the tests and fix failures"
 
-In the REPL: /chat and /agent switch modes, /clear resets, /exit quits.
+In the REPL: /chat and /agent switch modes, /cd switches folder (see "Switching
+folders"), /clear resets, /exit quits.
 `agent` does not index the folder when it starts; run /map when you want the repo map.
 Multi-line: pasted text is kept together (press Enter on an empty line to send),
 or type """ on its own line to start and end a multi-line message.
@@ -123,6 +124,12 @@ repo map and settings:
 - If the model names a repo file that isn't in the chat, coder offers to add
   it and re-send your request.
 - /micro <request> runs the request through the micro-agent loop (see below).
+- /cd [folder] switches to another folder (see "Switching folders").
+- Edits keep a file's line endings (LF, CRLF or mixed), BOM and missing final
+  newline, and /undo restores its exact bytes. Files that aren't UTF-8 text can't be
+  edited, here or in agent-ui: /read them, or convert them to UTF-8 first.
+- /undo also reverts the edits of a request you stopped with Ctrl-C. Ctrl-D at a
+  yes/no question means no.
 - /undo, /diff, /run <cmd> (optionally share output), /tokens, /map, /clear, /reset.
 - /lint runs syntax checks; /test runs AGENT_TEST_CMD; /autotest on|off toggles auto-test after edits.
 - /review [target] reviews code changes (see below).
@@ -132,6 +139,35 @@ repo map and settings:
   then the oldest history is dropped to stay under it, you're warned if the
   files alone are too big, and /review splits per file past 50% of the budget.
   Left unset or set to 0/inf/infinite/none/unlimited, nothing is trimmed.
+
+## Switching folders (`/cd`)
+Works in coder and agent. The prompt shows the active folder's name. agent also
+puts the path in the header above each message (`#2 · agent · ~/work/billing · 14:39`),
+shortened from the left in a narrow terminal (`…/billing`).
+
+    /cd ../billing      # a path, relative to the active folder (~ and quotes work)
+    /cd                 # current folder's full path, then the last 10 used (* = active)
+    /cd 2               # that number in the list
+    /cd billing         # a recent folder, by name
+
+A number from the list comes first, then a path, then a name (write `./2` for a
+folder called 2). Numbers keep their meaning until you show the list again. If
+several recent folders share a name, coder lists their paths and stays put.
+
+- Each folder gets its own session the first time you switch to it: files in the
+  chat, history, mode, undo, repo map, project notes and skills. It starts in the
+  mode you launched with (`--ask`, `--chat`). Sessions live in memory until you exit:
+  Ctrl-C during a command only stops that command, but at the prompt it exits.
+- The recent list is saved in `~/.config/agent-cli/folders.json`, shared by coder
+  and agent. One-shot runs (`--message`, `agent "task"`...) don't add to it.
+- Commands, tools and checks run in the active folder: /run, /test, /lint, /review...
+  In a subfolder of a repo, /review covers that subfolder's changes only.
+- /model, /autotest and `-y` apply to all folders. Settings from the environment
+  and `.env` (including AGENT_TEST_CMD) are read once, at startup.
+- `.agentignore` and `.agent/redact*` are read from the active folder only, so
+  a parent's rules don't apply in its subfolders; /cd warns when there are some.
+- /undo restores whole files. If two sessions cover the same file (a folder and
+  its subfolder), undoing in one also drops later edits made in the other.
 
 ## Change style: smallest complete change
 coder and the `/micro` Editor add a short set of rules to their system prompt,
@@ -472,6 +508,7 @@ auto-selected and injected as context (the model doesn't choose skills).
 
 ## Code review
 Review code changes with a structured checklist. Works in both coder and agent.
+Started or /cd'ed into a subfolder of a repo, it covers that subfolder only.
 
     /review                 # uncommitted changes (git diff HEAD + untracked)
     /review staged          # staged changes (git diff --cached)

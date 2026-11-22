@@ -16,9 +16,9 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from rich.console import Console
-from rich.prompt import Confirm
 
 from .config import Config
+from .input_reader import Confirm
 from .llm import LLMError, chat
 from .term import safe_markup
 

@@ -1,25 +1,44 @@
+import dataclasses
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import typer
 from rich.console import Console
 
 from .agent import Agent
 from .config import Config
+from .folders import Folders
 from .input_reader import read_message, set_completer, was_erased
 from .mentions import expand as expand_mentions
 from .llm import list_models, switch_model
 from . import redact
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
 from .review import collect_material, material_branch_note, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
-from .skills import load_skills, select_skills, format_skill_context, list_skills_display
+from .skills import Skill, load_skills, select_skills, format_skill_context, list_skills_display
 from .turns import prompt_header
 from .term import safe_markup
 from .version import VERSION_OPTION
 from .writing import handle as handle_writing
 
+if TYPE_CHECKING:
+    from .coder import Coder
+
 cli = typer.Typer(add_completion=False)
 console = Console()
+
+
+@dataclasses.dataclass
+class _Session:
+    """What the agent REPL keeps for one folder."""
+    cfg: Config
+    agent: Agent
+    skills: List[Skill]
+    pinned_skill: Optional[Skill] = None
+    coder: Optional["Coder"] = None  # built on first use of a pipeline
+
+
+def _new_session(cfg: Config, chat_only: bool) -> _Session:
+    return _Session(cfg, Agent(cfg, chat_only=chat_only), load_skills(cfg.workdir))
 
 
 def app() -> None:
@@ -86,20 +105,19 @@ def main(
         _do_review(cfg, review)
         return
 
-    agent = Agent(cfg, chat_only=chat_only)
-    skills = load_skills(cfg.workdir)
-    pinned_skill = None  # type: ignore
+    base_cfg = dataclasses.replace(cfg)  # for /cd: Coder() changes cfg for its own folder
+    session = _new_session(cfg, chat_only)
+    agent, skills = session.agent, session.skills
 
     # The test-gen / doc-gen pipelines live on Coder. The agent command builds
     # one lazily (it detects Android and indexes, so we avoid that cost unless a
-    # pipeline is actually invoked) and reuses it across calls.
-    _coder_holder = {}  # type: dict
+    # pipeline is actually invoked) and reuses it across calls in that folder.
 
     def _get_coder():
-        if "c" not in _coder_holder:
+        if session.coder is None:
             from .coder import Coder
-            _coder_holder["c"] = Coder(cfg)
-        return _coder_holder["c"]
+            session.coder = Coder(cfg)
+        return session.coder
 
     def _prepare(text: str) -> str:
         """Inline any @file mentions, then append skill context."""
@@ -111,9 +129,8 @@ def main(
 
     def _augment_with_skills(text: str) -> str:
         """Append skill context to the user message for the agent."""
-        nonlocal pinned_skill
-        if pinned_skill is not None:
-            active = [pinned_skill]
+        if session.pinned_skill is not None:
+            active = [session.pinned_skill]
         else:
             active = select_skills(skills, text) if skills else []
         if not active:
@@ -122,14 +139,14 @@ def main(
         for skill in active:
             skill_text = format_skill_context(skill, cfg.skill_chars)
             parts.append("\n\n" + skill_text)
-            if pinned_skill is None:
+            if session.pinned_skill is None:
                 console.print(f"[dim]Skill: {safe_markup(skill.name)}[/dim]")
         return "".join(parts)
 
     def _route_or_ask(text: str) -> None:
         """Send `text` to a pipeline if it's a test/doc request, else the agent."""
         from .intent import route as route_intent
-        if not chat_only and route_intent(cfg, _get_coder(), text, console):
+        if not agent.chat_only and route_intent(cfg, _get_coder(), text, console):
             return
         agent.ask(_prepare(text))
 
@@ -145,12 +162,12 @@ def main(
     if skills:
         console.print(f"[dim]Skills: {len(skills)} loaded[/dim]")
     console.print(f"[dim]Mode: {agent.mode_name}. "
-                  "/chat = chat only, /agent = use tools, /micro <request> = micro-agent edit loop, "
+                  "/chat = chat only, /agent = use tools, /cd \\[folder] = switch folder, /micro <request> = micro-agent edit loop, "
                   "/analyze <request> = read-only code analysis doc, "
-                  "/review [target] = code review, "
+                  "/review \\[target] = code review, "
                   "/test-gen <class> = generate tests, /doc <target> = generate docs, "
-                  "/map [query] = build repo map, /notes = show notes, /skills = list skills, "
-                  "/model [name] = switch model, /clear = reset, /exit = quit.\n"
+                  "/map \\[query] = build repo map, /notes = show notes, /skills = list skills, "
+                  "/model \\[name] = switch model, /clear = reset, /exit = quit.\n"
                   "Writing: /grammar, /rephrase, /tone <style>, /email, /slack — each takes text "
                   '(inline or a """ block).\n'
                   '""" starts/ends a multi-line message; pastes are kept together.[/dim]\n')
@@ -158,148 +175,160 @@ def main(
     # '/' shows the command menu; '@' completes a repo file path. The file list
     # comes from `git ls-files` (list_files needs no repo-map build) and is
     # fetched lazily on first '@' and cached by the completer.
-    set_completer(AgentCompleter(files_fn=lambda: agent.tools.repo_map.list_files()))
+    def use_completer() -> None:
+        set_completer(AgentCompleter(files_fn=lambda: agent.tools.repo_map.list_files()))
+
+    use_completer()
+    folders = Folders(base_cfg, session, lambda c: _new_session(c, chat_only))
     turn = 0
     while True:
         try:
             color = "blue" if agent.chat_only else "green"
-            text = read_message(f"[bold {color}]{agent.mode_name} › [/bold {color}]", erase=True).strip()
+            text = read_message(f"[bold {color}]{agent.mode_name}[/bold {color}]"
+                                f"[dim] {folders.label}[/dim]"
+                                f"[bold {color}] › [/bold {color}]", erase=True).strip()
         except (EOFError, KeyboardInterrupt):
             break
         if not text:
             continue
         if text in ("/exit", "/quit"):
             break
-        # Reprint the message as a numbered header so prompts stand out when
-        # scrolling back (and "#7" is something to search for). If the input
-        # method left the typed text on screen, print just the rule.
-        turn += 1
-        console.print(prompt_header(turn, text if was_erased() else None, agent.mode_name, color))
-        if text in ("/chat", "/agent"):
-            agent.set_mode(text == "/chat")
-            console.print(f"[dim]Switched to {agent.mode_name} mode (history cleared).[/dim]")
-            continue
-        if text.startswith("/map"):
-            query = text[4:].strip()
-            try:
+        try:
+            # Reprint the message as a numbered header so prompts stand out when
+            # scrolling back (and "#7" is something to search for). If the input
+            # method left the typed text on screen, print just the rule.
+            turn += 1
+            console.print(prompt_header(turn, text if was_erased() else None, agent.mode_name, color,
+                                        path=folders.short_path))
+            if text.split(None, 1)[0] == "/cd":
+                switched = folders.cd(text[3:])
+                if switched:
+                    session = switched
+                    cfg, agent, skills = session.cfg, session.agent, session.skills
+                    use_completer()
+                continue
+            if folders.is_missing():
+                continue
+            if text in ("/chat", "/agent"):
+                agent.set_mode(text == "/chat")
+                console.print(f"[dim]Switched to {agent.mode_name} mode (history cleared).[/dim]")
+                continue
+            if text.startswith("/map"):
+                query = text[4:].strip()
                 rm = agent.load_map()
                 console.print(rm.render(query=query, budget=cfg.map_chars), markup=False, highlight=False)
-            except KeyboardInterrupt:
-                console.print("\n[yellow]Interrupted.[/yellow]")
+                if rm.files:
+                    if not cfg.use_map:
+                        note = "not added to the model's context (AGENT_MAP=0)"
+                    elif agent.chat_only:
+                        note = "the model gets it when you switch to /agent"
+                    else:
+                        note = "added to the model's context; run /map again to refresh"
+                    console.print(f"[dim]Repo map: {len(rm.files)} files indexed, {note}.[/dim]")
                 continue
-            if rm.files:
-                if not cfg.use_map:
-                    note = "not added to the model's context (AGENT_MAP=0)"
+            if text.startswith("/review"):
+                target = text[7:].strip()
+                _do_review(cfg, target)
+                continue
+            if text == "/debt":
+                from .debt import find_shortcuts, format_debt
+                console.print(format_debt(find_shortcuts(cfg.workdir)), markup=False, highlight=False)
+                continue
+            if text == "/skills":
+                console.print(list_skills_display(skills))
+                continue
+            if text.startswith("/skill ") or text == "/skill":
+                arg = text[7:].strip() if text.startswith("/skill ") else ""
+                if not arg or arg == "off":
+                    session.pinned_skill = None
+                    console.print("[dim]Skill unpinned.[/dim]")
+                else:
+                    match = [s for s in skills if s.name == arg]
+                    if match:
+                        session.pinned_skill = match[0]
+                        console.print(f"[dim]Skill pinned: {match[0].name}[/dim]")
+                    else:
+                        console.print(f"[yellow]No skill named '{arg}'. Use /skills to list.[/yellow]")
+                continue
+            if text == "/notes":
+                if cfg.notes_enabled:
+                    notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars, warn_once=False)
+                    if notes_path:
+                        console.print(f"[dim]Notes file: {notes_path}[/dim]")
+                        console.print(notes_text, markup=False, highlight=False)
+                    else:
+                        console.print("[dim]No project notes file found. Create one with:\n"
+                                      "  agent --init-notes\n"
+                                      "Or create AGENT.md in the project root.[/dim]")
+                else:
+                    console.print("[dim]Project notes disabled (AGENT_NOTES=0).[/dim]")
+                continue
+            if text == "/model" or text.startswith("/model "):
+                switch_model(cfg, text[6:], console)
+                continue
+            if text.split(None, 1)[0] in ("/grammar", "/rephrase", "/tone", "/email", "/slack"):
+                # Split off the command word; the rest (which may begin on the next
+                # line, e.g. a """ block) is the text to transform. split(None, 1)
+                # splits on the first run of any whitespace, newlines included.
+                parts = text.split(None, 1)
+                cmd = parts[0]
+                arg = parts[1] if len(parts) > 1 else ""
+                handle_writing(cfg, cmd, arg.strip())
+                continue
+            if text == "/clear":
+                agent.reset()
+                console.print("[dim]History cleared.[/dim]")
+                continue
+            if text.startswith("/micro"):
+                arg = text[len("/micro"):].strip()
+                if not arg:
+                    console.print("[yellow]Usage: /micro <request>[/yellow]")
                 elif agent.chat_only:
-                    note = "the model gets it when you switch to /agent"
+                    console.print("[yellow]/micro needs tools; switch to agent mode (/agent) first.[/yellow]")
                 else:
-                    note = "added to the model's context; run /map again to refresh"
-                console.print(f"[dim]Repo map: {len(rm.files)} files indexed, {note}.[/dim]")
-            continue
-        if text.startswith("/review"):
-            target = text[7:].strip()
-            _do_review(cfg, target)
-            continue
-        if text == "/debt":
-            from .debt import find_shortcuts, format_debt
-            console.print(format_debt(find_shortcuts(cfg.workdir)), markup=False, highlight=False)
-            continue
-        if text == "/skills":
-            console.print(list_skills_display(skills))
-            continue
-        if text.startswith("/skill ") or text == "/skill":
-            arg = text[7:].strip() if text.startswith("/skill ") else ""
-            if not arg or arg == "off":
-                pinned_skill = None
-                console.print("[dim]Skill unpinned.[/dim]")
-            else:
-                match = [s for s in skills if s.name == arg]
-                if match:
-                    pinned_skill = match[0]
-                    console.print(f"[dim]Skill pinned: {match[0].name}[/dim]")
+                    _get_coder().micro(_prepare(arg))
+                continue
+            if text.startswith("/analyze"):
+                arg = text[len("/analyze"):].strip()
+                if not arg:
+                    console.print("[yellow]Usage: /analyze <request>[/yellow]")
+                elif agent.chat_only:
+                    console.print("[yellow]/analyze needs tools; switch to agent mode (/agent) first.[/yellow]")
                 else:
-                    console.print(f"[yellow]No skill named '{arg}'. Use /skills to list.[/yellow]")
-            continue
-        if text == "/notes":
-            if cfg.notes_enabled:
-                notes_path, notes_text = load_notes(cfg.workdir, cfg.notes_file, cfg.notes_chars, warn_once=False)
-                if notes_path:
-                    console.print(f"[dim]Notes file: {notes_path}[/dim]")
-                    console.print(notes_text, markup=False, highlight=False)
+                    _get_coder().analyze(_prepare(arg))
+                continue
+            if text.startswith("/test-gen"):
+                arg = text[len("/test-gen"):].strip()
+                parts = arg.split()
+                if not parts:
+                    console.print("[yellow]Usage: /test-gen <class|file> \\[method][/yellow]")
                 else:
-                    console.print("[dim]No project notes file found. Create one with:\n"
-                                  "  agent --init-notes\n"
-                                  "Or create AGENT.md in the project root.[/dim]")
-            else:
-                console.print("[dim]Project notes disabled (AGENT_NOTES=0).[/dim]")
-            continue
-        if text == "/model" or text.startswith("/model "):
-            switch_model(cfg, text[6:], console)
-            continue
-        if text.split(None, 1)[0] in ("/grammar", "/rephrase", "/tone", "/email", "/slack"):
-            # Split off the command word; the rest (which may begin on the next
-            # line, e.g. a """ block) is the text to transform. split(None, 1)
-            # splits on the first run of any whitespace, newlines included.
-            parts = text.split(None, 1)
-            cmd = parts[0]
-            arg = parts[1] if len(parts) > 1 else ""
-            handle_writing(cfg, cmd, arg.strip())
-            continue
-        if text == "/clear":
-            agent.reset()
-            console.print("[dim]History cleared.[/dim]")
-            continue
-        if text.startswith("/micro"):
-            arg = text[len("/micro"):].strip()
-            if not arg:
-                console.print("[yellow]Usage: /micro <request>[/yellow]")
-            elif chat_only:
-                console.print("[yellow]/micro needs tools; switch to agent mode (/agent) first.[/yellow]")
-            else:
-                _get_coder().micro(_prepare(arg))
-            continue
-        if text.startswith("/analyze"):
-            arg = text[len("/analyze"):].strip()
-            if not arg:
-                console.print("[yellow]Usage: /analyze <request>[/yellow]")
-            elif chat_only:
-                console.print("[yellow]/analyze needs tools; switch to agent mode (/agent) first.[/yellow]")
-            else:
-                _get_coder().analyze(_prepare(arg))
-            continue
-        if text.startswith("/test-gen"):
-            arg = text[len("/test-gen"):].strip()
-            parts = arg.split()
-            if not parts:
-                console.print("[yellow]Usage: /test-gen <class|file> [method][/yellow]")
-            else:
-                _get_coder().test_gen(parts[0], parts[1] if len(parts) > 1 else "")
-            continue
-        if text.startswith("/doc"):
-            arg = text[len("/doc"):].strip()
-            doc_update = "--update" in arg
-            doc_target = arg.replace("--update", "").strip()
-            if not doc_target:
-                console.print("[yellow]Usage: /doc <class|file|folder> [--update][/yellow]")
-            else:
-                _get_coder().doc_gen(doc_target, update_mode=doc_update)
-            continue
-        if text.startswith("/"):
-            # Reached here with a leading slash means no command above matched,
-            # so it's a typo'd/unknown command (e.g. /grammer). Warn instead of
-            # silently sending it to the model as a chat message.
-            unknown = text.split(None, 1)[0]
-            console.print(f"[yellow]Unknown command: {unknown}[/yellow]")
-            console.print("[dim]Commands: /chat /agent /micro /analyze /review /debt /test-gen /doc /map /notes "
-                          "/skills /skill /model /clear /exit · writing: /grammar /rephrase "
-                          "/tone /email /slack"
-                          "\nTo send a message starting with '/', rephrase it.[/dim]")
-            continue
-        try:
+                    _get_coder().test_gen(parts[0], parts[1] if len(parts) > 1 else "")
+                continue
+            if text.startswith("/doc"):
+                arg = text[len("/doc"):].strip()
+                doc_update = "--update" in arg
+                doc_target = arg.replace("--update", "").strip()
+                if not doc_target:
+                    console.print("[yellow]Usage: /doc <class|file|folder> [--update][/yellow]")
+                else:
+                    _get_coder().doc_gen(doc_target, update_mode=doc_update)
+                continue
+            if text.startswith("/"):
+                # Reached here with a leading slash means no command above matched,
+                # so it's a typo'd/unknown command (e.g. /grammer). Warn instead of
+                # silently sending it to the model as a chat message.
+                unknown = text.split(None, 1)[0]
+                console.print(f"[yellow]Unknown command: {unknown}[/yellow]")
+                console.print("[dim]Commands: /chat /agent /cd /micro /analyze /review /debt /test-gen /doc /map /notes "
+                              "/skills /skill /model /clear /exit · writing: /grammar /rephrase "
+                              "/tone /email /slack"
+                              "\nTo send a message starting with '/', rephrase it.[/dim]")
+                continue
             _route_or_ask(text)
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Interrupted.[/yellow]")
-        console.print()
+            console.print()
+        except KeyboardInterrupt:  # stops the command, not the REPL and its sessions
+            console.print("\n[yellow]Interrupted.[/yellow]\n")
 
 
 def _do_review(cfg: Config, target: str) -> None:

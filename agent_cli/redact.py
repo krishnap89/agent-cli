@@ -1315,48 +1315,53 @@ class Redactor:
         with _pending_lock:
             texts = list(_pending_strict)
             _pending_strict.clear()
-        if not (self.enabled and self.strict) or not texts:
-            return
-        if time.monotonic() < self._strict_retry_at:
-            _requeue(texts)
-            return
-        from . import llm
-        import dataclasses
-        model, url = self._pii_target(cfg)
-        sub_cfg = dataclasses.replace(cfg, model=model, base_url=url, stream=False,
-                                      temperature=0.0, retries=1)
-        for idx, text in enumerate(texts):
-            digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
-            if digest in self._strict_done:
-                continue
-            masked = self.mask_text(text)   # the model only sees rule-masked text
-            found: List[str] = []
-            for i in range(0, len(masked), 6000):
-                chunk = masked[i:i + 6000]
-                _tls.in_strict = True
-                _tls.quiet = True
-                try:
-                    reply = llm.chat(sub_cfg, [
-                        {"role": "system", "content": STRICT_SYSTEM},
-                        {"role": "user", "content": chunk},
-                    ])
-                except Exception as e:
-                    self._strict_retry_at = time.monotonic() + 60
-                    _requeue(texts[idx:])
-                    if not self._strict_failed:
-                        self._strict_failed = True
-                        _report(f"strict PII check failed ({str(e)[:120]}); "
-                                "rule-based masking still applied, retrying later.", "warn")
-                    return
-                finally:
-                    _tls.in_strict = False
-                    _tls.quiet = False
-                found += parse_strict_reply(reply.content)
-            self._strict_failed = False
-            for item in found:
-                if item in text:
-                    self.learn(item, "PII")
-            self._strict_done.add(digest)
+        idx = 0
+        try:
+            if not (self.enabled and self.strict) or not texts:
+                return
+            if time.monotonic() < self._strict_retry_at:
+                _requeue(texts)
+                return
+            from . import llm
+            import dataclasses
+            model, url = self._pii_target(cfg)
+            sub_cfg = dataclasses.replace(cfg, model=model, base_url=url, stream=False,
+                                          temperature=0.0, retries=1)
+            for idx, text in enumerate(texts):
+                digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()
+                if digest in self._strict_done:
+                    continue
+                masked = self.mask_text(text)   # the model only sees rule-masked text
+                found: List[str] = []
+                for i in range(0, len(masked), 6000):
+                    chunk = masked[i:i + 6000]
+                    _tls.in_strict = True
+                    _tls.quiet = True
+                    try:
+                        reply = llm.chat(sub_cfg, [
+                            {"role": "system", "content": STRICT_SYSTEM},
+                            {"role": "user", "content": chunk},
+                        ])
+                    except Exception as e:
+                        self._strict_retry_at = time.monotonic() + 60
+                        _requeue(texts[idx:])
+                        if not self._strict_failed:
+                            self._strict_failed = True
+                            _report(f"strict PII check failed ({str(e)[:120]}); "
+                                    "rule-based masking still applied, retrying later.", "warn")
+                        return
+                    finally:
+                        _tls.in_strict = False
+                        _tls.quiet = False
+                    found += parse_strict_reply(reply.content)
+                self._strict_failed = False
+                for item in found:
+                    if item in text:
+                        self.learn(item, "PII")
+                self._strict_done.add(digest)
+        except KeyboardInterrupt:
+            _requeue(texts[idx:])   # not checked yet, and may still be in the history
+            raise
 
 
 def _requeue(texts: List[str]) -> None:
@@ -1470,6 +1475,15 @@ def reset_sessions() -> None:
         _sessions.clear()
     with _pending_lock:
         _pending_strict.clear()
+
+
+def swap_pending(texts: List[str]) -> List[str]:
+    """Replace the strict-check queue and return the old one. /cd keeps one per
+    folder, as a text must be learned by the Redactor that will send it."""
+    with _pending_lock:
+        old = list(_pending_strict)
+        _pending_strict[:] = texts
+    return old
 
 
 def check_file(root, path) -> Optional[str]:
