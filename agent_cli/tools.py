@@ -4,11 +4,13 @@ from pathlib import Path
 
 from rich.console import Console
 from rich.prompt import Confirm
+from rich.text import Text
 
 from . import redact
 from .checks import relative_paths
 from .config import Config
 from .repomap import RepoMap
+from .term import reveal
 
 console = Console()
 
@@ -223,6 +225,9 @@ class Tools:
         self.todos: list[dict] = []  # session task list: {text, status}
 
     _DIFF_MAX_LINES = 60  # lines of a diff shown before a write is confirmed
+    # Approvals bigger than this can scroll their start off screen, so Enter means no
+    _ENTER_YES_MAX_CHARS = 500
+    _ENTER_YES_MAX_LINES = 10
 
     def ensure_map(self) -> RepoMap:
         """Build (or refresh from cache) the repo map; cheap after the first time."""
@@ -245,52 +250,65 @@ class Tools:
             raise ToolError(refused)
         return p
 
-    def _confirm(self, action: str) -> bool:
+    def _confirm(self, action: str, preview_plain: bool = True) -> bool:
         if self.cfg.auto_approve:
             return True
-        return Confirm.ask(f"[yellow]Allow:[/yellow] {action}", default=True)
+        shown = reveal(action)
+        # Enter means yes only when all of the action is plainly visible.
+        plain = (preview_plain and shown == action and len(shown.expandtabs()) <= self._ENTER_YES_MAX_CHARS
+                 and shown.count("\n") < self._ENTER_YES_MAX_LINES)
+        if not plain:
+            console.print("[yellow]Hidden characters or a long action: read it all, "
+                          "then type y to allow.[/yellow]")
+        # Text, not markup: markup and :emoji: codes would change what is approved
+        return Confirm.ask(Text.assemble(("Allow:", "yellow"), " ", shown), default=plain)
 
-    def _show_diff(self, rel: str, old_text: str, new_text: str) -> None:
+    def _show_diff(self, rel: str, old_text: str, new_text: str) -> bool:
         """Print a colored, line-capped unified diff before a write is confirmed,
-        so the user sees what will change instead of approving blind."""
+        so the user sees what will change instead of approving blind.
+
+        Returns False if any added line, shown or not, has hidden characters."""
         if self.cfg.auto_approve:
-            return  # no human to show it to
+            return True  # no human to show it to
         if old_text == new_text:
-            console.print(f"[dim]{rel}: no change[/dim]")
-            return
+            console.print(Text(f"{reveal(rel)}: no change", style="dim"))
+            return True
         label = "new file" if old_text == "" else rel
-        diff = difflib.unified_diff(
-            old_text.splitlines(), new_text.splitlines(),
+        diff = list(difflib.unified_diff(
+            self._diff_lines(old_text), self._diff_lines(new_text),
             fromfile=label, tofile=label, lineterm="", n=2,
-        )
+        ))[2:]  # drop the two headers by position: content can start with ++ or -- too
         adds = dels = shown = 0
+        plain = True
         body = []
         for line in diff:
-            if line.startswith(("---", "+++")):
-                continue
             if line.startswith("+"):
                 adds += 1
-            elif line.startswith("-") and not line.startswith("---"):
+                plain = plain and reveal(line) == line
+            elif line.startswith("-"):
                 dels += 1
             if shown < self._DIFF_MAX_LINES:
-                if line.startswith("@@"):
-                    body.append(f"[cyan]{line}[/cyan]")
-                elif line.startswith("+"):
-                    body.append(f"[green]{line}[/green]")
-                elif line.startswith("-"):
-                    body.append(f"[red]{line}[/red]")
-                else:
-                    body.append(f"[dim]{line}[/dim]")
+                style = {"@": "cyan", "+": "green", "-": "red"}.get(line[:1], "dim")
+                body.append(Text(reveal(line), style=style))  # file content is not markup
                 shown += 1
-        console.print(f"[yellow]~ {rel}[/yellow] [dim](+{adds} -{dels})[/dim]")
-        console.print("\n".join(body))
+        console.print(Text.assemble((f"~ {reveal(rel)}", "yellow"), " ",
+                                    (f"(+{adds} -{dels})", "dim")))
+        console.print(Text("\n").join(body))
         if shown >= self._DIFF_MAX_LINES:
             console.print(f"[dim]... diff truncated ({self._DIFF_MAX_LINES} lines shown)[/dim]")
+        return plain
+
+    @staticmethod
+    def _diff_lines(text: str) -> list:
+        # Not splitlines(): it swallows \\r, \\f and U+2028, which must be shown.
+        lines = text.replace("\r\n", "\n").split("\n")
+        return lines[:-1] if lines[-1] == "" else lines
 
     def run(self, name: str, args: dict) -> str:
         fn = getattr(self, f"t_{name}", None)
         if fn is None:
-            raise ToolError(f"Unknown tool: {name}")
+            noun = "action" if self.cfg.tool_format == "action" else "tool"
+            raise ToolError(f"Unknown {noun}: {name}")
         out = fn(**args)
         if len(out) > MAX_OUTPUT:
             out = out[:MAX_OUTPUT] + f"\n... [truncated {len(out) - MAX_OUTPUT} chars]"
@@ -333,8 +351,8 @@ class Tools:
     def t_write_file(self, path: str, content: str) -> str:
         p = self._resolve_sendable(path)
         old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
-        self._show_diff(path, old, content)
-        if not self._confirm(f"write {path} ({len(content)} chars)"):
+        plain = self._show_diff(path, old, content)
+        if not self._confirm(f"write {path} ({len(content)} chars)", plain):
             return "User denied the write."
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -346,8 +364,8 @@ class Tools:
         count = text.count(old_str)
         if count != 1:
             raise ToolError(f"old_str found {count} times in {path}; it must be unique.")
-        self._show_diff(path, text, text.replace(old_str, new_str))
-        if not self._confirm(f"edit {path}"):
+        plain = self._show_diff(path, text, text.replace(old_str, new_str))
+        if not self._confirm(f"edit {path}", plain):
             return "User denied the edit."
         p.write_text(text.replace(old_str, new_str), encoding="utf-8")
         return f"Edited {path}"
@@ -394,10 +412,11 @@ class Tools:
 
         files = {rel for rel, _ in plan}
         summary = ", ".join(sorted(files))
+        plain = True
         for p, text in pending.items():
-            self._show_diff(p.relative_to(self.root).as_posix(),
-                            originals[p] or "", text)
-        if not self._confirm(f"apply {len(edits)} edit(s) to {len(files)} file(s): {summary}"):
+            plain = self._show_diff(p.relative_to(self.root).as_posix(),
+                                    originals[p] or "", text) and plain
+        if not self._confirm(f"apply {len(edits)} edit(s) to {len(files)} file(s): {summary}", plain):
             return "User denied the patch."
         # Phase 2: all edits validated — write.
         for p, text in pending.items():
@@ -537,6 +556,8 @@ class Tools:
         return self._render_todos()
 
     def t_run_command(self, command: str) -> str:
+        if not isinstance(command, str):  # shlex.split(None) would wait on stdin
+            raise ToolError("command must be a string.")
         refused = self._blocked_in_command(command)
         if refused:
             raise ToolError(refused + " Run the command yourself if you need it.")

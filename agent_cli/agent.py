@@ -8,16 +8,19 @@ from rich.markdown import Markdown
 from .checks import relative_paths
 from .config import (ACTION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION,
                      Config, SYSTEM_PROMPT)
-from .llm import LLMError, chat
+from .llm import ACTION_BLOCK, CUT_OFF_REASONS, LLMError, chat
 from .notes import load_notes
-from .tools import TOOL_SCHEMAS, JIRA_TOOL_SCHEMAS, ToolError, Tools
+from .term import safe_markup, safe_text
+from .tools import TOOL_SCHEMAS, JIRA_TOOL_SCHEMAS, Tools
 from .jira import is_configured as is_jira_configured
 
-console = Console()
+console = Console(emoji=False)  # :codes: in model text are not emoji
 
 TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
 # Also strips an unclosed <think> (model ran out of tokens while thinking)
 THINK_RE = re.compile(r"<think>(.*?)(?:</think>|$)", re.DOTALL)
+# Either an action block (kept) or thinking (dropped), whichever starts first
+_BLOCK_OR_THINK_RE = re.compile(rf"({ACTION_BLOCK})|<think>.*?(?:</think>|\Z)", re.DOTALL)
 # A line that is nothing but a lead-in to the action ("So let me read that
 # file.", "I'll now call the tool.") carries no information on its own, so when
 # we pick the gist we skip past these to the last substantive line.
@@ -64,7 +67,7 @@ CODE_RE = re.compile(r"(```[\s\S]*?(?:```|$)|`[^`\n]*`)")
 def show(text: str) -> None:
     """Print as markdown. rich silently drops HTML-like text (e.g. <div>),
     so escape '<' everywhere except inside code, where it already shows fine."""
-    parts = CODE_RE.split(text)
+    parts = CODE_RE.split(safe_text(text))
     safe = "".join(p if i % 2 else p.replace("<", "&lt;") for i, p in enumerate(parts))
     console.print(Markdown(safe))
 
@@ -82,6 +85,17 @@ def _xml_value(value: str):
         return json.loads(v)
     except json.JSONDecodeError:
         return v
+
+
+def strip_thinking(text: str, tool_format: str) -> str:
+    if tool_format == "action":
+        return _BLOCK_OR_THINK_RE.sub(lambda m: m.group(1) or "", text).strip()
+    return THINK_RE.sub("", text).strip()
+
+
+def response_tag(cfg: Config) -> str:
+    """Tag that wraps results sent back to the model."""
+    return "action_response" if cfg.tool_format == "action" else "tool_response"
 
 
 def render_tool_docs(cfg=None) -> str:
@@ -148,8 +162,11 @@ def _bare_json_calls(text: str) -> list[str]:
     return out
 
 
-def parse_tool_calls(text: str) -> tuple[list[dict], list[str]]:
-    """Extract tool calls from model text. Returns (calls, parse_errors)."""
+def parse_tool_calls(text: str, cut_off: bool = False) -> tuple[list[dict], list[str]]:
+    """Extract tool calls from model text. Returns (calls, parse_errors).
+
+    cut_off: the reply ended early. Half-received JSON never parses, but the
+    <function=...> form does, so that one must be closed to run."""
     calls, errors = [], []
     blocks = TOOL_CALL_RE.findall(text)
     if not blocks:
@@ -158,6 +175,10 @@ def parse_tool_calls(text: str) -> tuple[list[dict], list[str]]:
         raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
         func = XML_FUNC_RE.search(raw)
         if func and not raw.startswith("{"):
+            if cut_off and not func.group().endswith("</function>"):
+                errors.append(f"{func.group(1)} was not run: the reply was cut off inside the "
+                              "tool call. Send it again, shorter.")
+                continue
             args = {k: _xml_value(v) for k, v in XML_PARAM_RE.findall(func.group(2))}
             calls.append({"name": func.group(1), "arguments": args})
             continue
@@ -177,6 +198,7 @@ def parse_tool_calls(text: str) -> tuple[list[dict], list[str]]:
 # For models that return empty content for the XML <tool_call> form but will
 # happily write plain prose (e.g. Nemotron). Each tool call is a line:
 #   ACTION <tool> key=value key=value ...
+# write_file carries the file between <<<CONTENT and CONTENT>>> lines, and
 # edit_file instead carries OLD/NEW heredoc blocks after the line, and the
 # list-valued tools (apply_patch, todo) carry a single arg=<inline JSON>.
 ACTION_LINE_RE = re.compile(r"^\s*ACTION\s+([\w.-]+)\s*(.*)$")
@@ -186,6 +208,68 @@ _KV_RE = re.compile(r"(\w+)=(.*?)(?=\s+\w+=|$)")
 # Numeric args that should become ints, read from the schemas so the parser
 # stays in step with the tools.
 _INT_ARGS = {"start_line", "end_line"}
+
+
+CONTENT_OPEN, CONTENT_CLOSE = "<<<CONTENT", "CONTENT>>>"
+OLD_OPEN, OLD_CLOSE = "<<<OLD", "OLD"
+NEW_OPEN, NEW_CLOSE = "<<<NEW", "NEW"
+_OPENERS = (CONTENT_OPEN, OLD_OPEN, NEW_OPEN)
+
+
+def _read_block(lines: list[str], i: int, opener: str, closer: str) -> tuple[list[str], int]:
+    """Read one block that starts at lines[i], blank lines aside.
+
+    Returns (body, index after the block). Raises ValueError if it isn't closed."""
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i == len(lines) or lines[i].strip() != opener:
+        raise ValueError(f"expected a {opener} line, with no other text before it")
+    start = i = i + 1
+    # Markers count only at the start of a line, so a file can show them indented.
+    while i < len(lines) and lines[i].rstrip() != closer:
+        if lines[i].rstrip() == opener:
+            raise ValueError(f"found a second {opener} inside the block; "
+                             "close each block, and indent markers that are file content")
+        i += 1
+    if i == len(lines):
+        raise ValueError(f"no closing {closer} line at the start of a line. "
+                         "If the reply was cut off, send the change in smaller parts")
+    return lines[start:i], i + 1
+
+
+def _check_end(lines: list[str], i: int, opener: str, closer: str) -> None:
+    """Raise ValueError if the block that ended before lines[i] may have ended elsewhere."""
+    for later in lines[i:]:
+        if later.rstrip() == opener:
+            return
+        if later.rstrip() == closer:
+            raise ValueError(f"found a second {closer}, so the end of the block is unclear; "
+                             "indent markers that are file content")
+
+
+def _read_write(rest: str, lines: list[str], i: int) -> tuple[dict, int]:
+    path = rest[len("path="):].strip() if rest.startswith("path=") else ""
+    if not path or re.search(r"\scontent=|<<<CONTENT", path):
+        raise ValueError("the ACTION line must hold only path=<file>; "
+                         "the content goes in a block below it")
+    body, i = _read_block(lines, i, CONTENT_OPEN, CONTENT_CLOSE)
+    _check_end(lines, i, CONTENT_OPEN, CONTENT_CLOSE)
+    return {"path": path, "content": "\n".join(body) + "\n" if body else ""}, i
+
+
+def _read_edit(rest: str, lines: list[str], i: int) -> tuple[dict, int]:
+    path = (dict(_KV_RE.findall(rest)).get("path") or "").strip()
+    if not path:
+        raise ValueError("the ACTION line needs path=<file>")
+    old, i = _read_block(lines, i, OLD_OPEN, OLD_CLOSE)
+    new, i = _read_block(lines, i, NEW_OPEN, NEW_CLOSE)
+    _check_end(lines, i, NEW_OPEN, NEW_CLOSE)
+    return {"path": path, "old_str": "\n".join(old), "new_str": "\n".join(new)}, i
+
+
+# Actions with blocks. Their readers raise ValueError whenever a block's end is in
+# doubt: a wrong guess saves partial code, or runs the file's own text as actions.
+_BLOCK_READERS = {"write_file": _read_write, "edit_file": _read_edit}
 
 
 def _action_scalar(value: str):
@@ -200,41 +284,40 @@ def _action_scalar(value: str):
     return v
 
 
-def parse_action_calls(text: str) -> tuple[list[dict], list[str]]:
+def parse_action_calls(text: str, cut_off: bool = False) -> tuple[list[dict], list[str]]:
     """Parse ACTION-line tool calls. Returns the same (calls, errors) shape as
-    parse_tool_calls, so the rest of the loop is unchanged."""
+    parse_tool_calls, so the rest of the loop is unchanged.
+
+    cut_off: the reply ended early, so its last action is not returned: it may be
+    half of what was meant ("rm -rf build" of "rm -rf build/tmp")."""
     calls, errors = [], []
-    lines = text.splitlines()
+    last_is_call = False  # False when the reply's last action is already an error
+    # Not splitlines(): it also breaks on \\f and U+2028, which can be file content.
+    lines = text.replace("\r\n", "\n").split("\n")
     i = 0
     while i < len(lines):
+        marker = lines[i].rstrip()
+        if marker in _OPENERS:
+            last_is_call = False
+            errors.append(f"{marker} is out of place: blocks go right after their ACTION line. "
+                          "Nothing from that line on was run.")
+            break
         m = ACTION_LINE_RE.match(lines[i])
         if not m:
             i += 1
             continue
         name, rest = m.group(1), m.group(2).strip()
         i += 1
+        last_is_call = False
 
-        # edit_file: path on the ACTION line, then <<<OLD..OLD and <<<NEW..NEW.
-        if name == "edit_file":
-            path = (dict(_KV_RE.findall(rest)).get("path") or "").strip()
-            old, new, ok = [], [], True
-            for tag, bucket in (("OLD", old), ("NEW", new)):
-                while i < len(lines) and not lines[i].strip().startswith(f"<<<{tag}"):
-                    if ACTION_LINE_RE.match(lines[i]):  # ran into the next call
-                        break
-                    i += 1
-                if i >= len(lines) or not lines[i].strip().startswith(f"<<<{tag}"):
-                    errors.append(f"edit_file for {path or '?'} is missing its <<<{tag} block.")
-                    ok = False
-                    break
-                i += 1  # past the <<<TAG line
-                while i < len(lines) and lines[i].strip() != tag:
-                    bucket.append(lines[i])
-                    i += 1
-                i += 1  # past the closing TAG line
-            if ok:
-                calls.append({"name": "edit_file", "arguments": {
-                    "path": path, "old_str": "\n".join(old), "new_str": "\n".join(new)}})
+        if name in _BLOCK_READERS:
+            try:
+                args, i = _BLOCK_READERS[name](rest, lines, i)
+            except ValueError as e:
+                errors.append(f"{name} was not run: {e}. Nothing after it was run either.")
+                break  # what follows may be file content: never run it
+            calls.append({"name": name, "arguments": args})
+            last_is_call = True
             continue
 
         # List-valued tools: a single arg=<inline JSON>.
@@ -250,6 +333,7 @@ def parse_action_calls(text: str) -> tuple[list[dict], list[str]]:
             # edits list. Accept either an object (used as-is) or a bare value.
             args = value if isinstance(value, dict) else {key: value}
             calls.append({"name": name, "arguments": args})
+            last_is_call = True
             continue
 
         # Simple tools: key=value pairs.
@@ -258,35 +342,30 @@ def parse_action_calls(text: str) -> tuple[list[dict], list[str]]:
             args[k] = int(v) if k in _INT_ARGS and re.fullmatch(r"-?\d+", v.strip()) \
                 else _action_scalar(v)
         calls.append({"name": name, "arguments": args})
+        last_is_call = True
+    if cut_off and last_is_call:
+        errors.append(f"{calls.pop()['name']} was not run: the reply was cut off, so this last "
+                      "action may be incomplete. Send it again, in a shorter reply.")
     return calls, errors
 
 
 def strip_action_blocks(text: str) -> str:
-    """Remove ACTION lines and their OLD/NEW heredoc bodies, leaving the prose
-    the model wrote for the user."""
-    out, lines, i = [], text.splitlines(), 0
-    in_heredoc = None  # "OLD" or "NEW" while inside a block
+    """Remove ACTION lines and their CONTENT and OLD/NEW bodies, leaving the
+    prose the model wrote for the user."""
+    out, lines, i = [], text.replace("\r\n", "\n").split("\n"), 0
     while i < len(lines):
         line = lines[i]
-        stripped = line.strip()
-        if in_heredoc:
-            if stripped == in_heredoc:
-                in_heredoc = None
-            i += 1
-            continue
-        if ACTION_LINE_RE.match(line):
-            i += 1
-            continue
-        if stripped.startswith("<<<OLD"):
-            in_heredoc = "OLD"
-            i += 1
-            continue
-        if stripped.startswith("<<<NEW"):
-            in_heredoc = "NEW"
-            i += 1
-            continue
-        out.append(line)
+        if line.rstrip() in _OPENERS:
+            break
         i += 1
+        action = ACTION_LINE_RE.match(line)
+        if not action:
+            out.append(line)
+        elif action.group(1) in _BLOCK_READERS:
+            try:
+                _, i = _BLOCK_READERS[action.group(1)](action.group(2).strip(), lines, i)
+            except ValueError:
+                break  # the rest was not run and may be file content
     return "\n".join(out).strip()
 
 
@@ -370,31 +449,32 @@ class Agent:
                         status.update(f"[dim]{phase}... ({chars} chars)[/dim]")
 
                     def retry(err: str, attempt: int, wait: float) -> None:
-                        console.print(f"[yellow]{err.splitlines()[0][:150]}[/yellow]")
+                        console.print(f"[yellow]{safe_markup(err.splitlines()[0][:150])}[/yellow]")
                         console.print(f"[dim]Retrying in {wait:.0f}s (attempt {attempt + 1})...[/dim]")
 
                     # stop the model from inventing tool results
-                    stop = None if self.chat_only else ["<tool_response>"]
+                    stop = None if self.chat_only else [f"<{response_tag(self.cfg)}>"]
                     reply = chat(self.cfg, self.messages, stop=stop,
                                  on_progress=progress, on_retry=retry)
             except LLMError as e:
-                console.print(f"[red]{e}[/red]")
+                console.print(f"[red]{safe_markup(str(e))}[/red]")
                 self.messages.pop() if self.messages[-1]["role"] == "user" else None
                 return
-            text = THINK_RE.sub("", reply.content).strip()
+            text = strip_thinking(reply.content, self.cfg.tool_format)
             if self.cfg.show_thinking:
                 gist = thinking_gist(reply.reasoning, reply.content)
                 if gist:
-                    console.print(f"[dim]\N{THOUGHT BALLOON} {gist}[/dim]")
+                    console.print(f"[dim]\N{THOUGHT BALLOON} {safe_markup(gist)}[/dim]")
+            cut_off = reply.finish_reason in CUT_OFF_REASONS
             if self.chat_only:  # no tools: show everything as-is
                 calls, errors, visible = [], [], text
             elif self.cfg.tool_format == "action":
-                calls, errors = parse_action_calls(text)
-                # Hide the ACTION lines (and any OLD/NEW blocks) from the visible
+                calls, errors = parse_action_calls(text, cut_off)
+                # Hide the ACTION lines (and their blocks) from the visible
                 # reply, leaving only the prose the model wrote for the user.
                 visible = strip_action_blocks(text)
             else:
-                calls, errors = parse_tool_calls(text)
+                calls, errors = parse_tool_calls(text, cut_off)
                 visible = TOOL_CALL_RE.sub("", text).strip()
                 if reply.tool_calls:
                     # The server's own tool parser took the call out of the text.
@@ -422,6 +502,10 @@ class Agent:
                     self.messages.append({"role": "assistant", "content": "(no reply)"})
                     if self.chat_only:
                         nudge = "You sent an empty reply. Please answer the question."
+                    elif self.cfg.tool_format == "action":
+                        nudge = (("You only thought about what to do. Now do it: "
+                                  if thought_only else "You sent an empty reply. ")
+                                 + "Write an ACTION line, or give the final answer.")
                     elif thought_only:
                         nudge = ("You only thought about what to do. Now do it: write the tool "
                                  "call in the <tool_call> format, or give the final answer.")
@@ -445,10 +529,12 @@ class Agent:
             self.messages.append({"role": "assistant", "content": text})
             if visible:
                 show(visible)
+            if cut_off:
+                why = ("the connection closed early" if reply.finish_reason == "incomplete"
+                       else "raise AGENT_MAX_TOKENS")
+                console.print(f"[yellow](reply was cut off: {why})[/yellow]")
 
             if not calls and not errors:
-                if reply.finish_reason == "length":
-                    console.print("[yellow](reply was cut off: raise AGENT_MAX_TOKENS)[/yellow]")
                 # The model sometimes answers a "create a file" request by printing
                 # the file content in a code block instead of calling write_file.
                 # Nudge it once to actually write it, then let it answer normally.
@@ -456,21 +542,27 @@ class Agent:
                         and _asks_to_create_file(prompt) and _looks_like_file_body(text)):
                     file_nudged = True
                     console.print("[dim](model printed file content instead of writing it; "
-                                  "asking it to call write_file)[/dim]")
+                                  "asking it to write the file)[/dim]")
+                    if self.cfg.tool_format == "action":
+                        how = ("Write it now in exactly this form, with no code fence:\n"
+                               f"ACTION write_file path=<path>\n{CONTENT_OPEN}\n"
+                               f"<full content>\n{CONTENT_CLOSE}\n"
+                               "Do not print the content again outside the block.")
+                    else:
+                        how = ("Emit a single write_file tool call now, with the full content "
+                               "in the tool call's `content` field, in the <tool_call> format. "
+                               "Do not print the content again outside the tool call.")
                     self.messages.append({
                         "role": "user",
                         "content": ("You printed the file content but did not create the file. "
-                                    "A code block does nothing on its own. Emit a single "
-                                    "write_file tool call now, with the full content in the "
-                                    "tool call's `content` field, in the <tool_call> format. "
-                                    "Do not print the content again outside the tool call."),
+                                    "A code block does nothing on its own. " + how),
                     })
                     continue
                 self._print_footer(started, tool_count)
                 return  # plain answer = done
 
             results = [self._run_tool(c) for c in calls]
-            results += [f"<tool_response>\nError: {e}\n</tool_response>" for e in errors]
+            results += [self._wrap_result(f"Error: {e}") for e in errors]
             tool_count += len(calls)
             self.messages.append({"role": "user", "content": "\n".join(results)})
 
@@ -515,17 +607,25 @@ class Agent:
     }
 
     def _run_tool(self, call: dict) -> str:
-        name, args = call["name"], call["arguments"]
+        name, args = str(call["name"]), call["arguments"]
         color = self._TOOL_COLORS.get(name, "cyan")
-        console.print(f"[{color}]> {name}[/{color}] [dim]{json.dumps(args)[:120]}[/dim]")
+        console.print(f"[{color}]> {safe_markup(name)}[/{color}] [dim]{safe_markup(json.dumps(args)[:120])}[/dim]")
         try:
             output = self.tools.run(name, args)
-        except (ToolError, OSError, TypeError) as e:
-            output = relative_paths(f"Error: {e}", self.tools.root)
-            console.print(f"[red]{output}[/red]")
+        except Exception as e:  # goes back to the model; Ctrl-C still gets through
+            message = str(e) or type(e).__name__
+            if self.cfg.tool_format == "action":
+                # Python 3.10+ puts the class in argument errors: "Tools.t_search() ..."
+                message = message.replace("Tools.t_", "")
+            output = relative_paths(f"Error: {message}", self.tools.root)
+            console.print(f"[red]{safe_markup(output)}[/red]")
         else:
-            console.print(f"  [dim]{self._summarize(name, output)}[/dim]")
-        return f"<tool_response>\n[{name}]\n{output}\n</tool_response>"
+            console.print(f"  [dim]{safe_markup(self._summarize(name, output))}[/dim]")
+        return self._wrap_result(f"[{name}]\n{output}")
+
+    def _wrap_result(self, body: str) -> str:
+        tag = response_tag(self.cfg)
+        return f"<{tag}>\n{body}\n</{tag}>"
 
     @staticmethod
     def _summarize(name: str, output: str) -> str:

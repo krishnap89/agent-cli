@@ -70,7 +70,7 @@ class ApplyPatchTest(unittest.TestCase):
     def test_denied_patch_writes_nothing(self):
         t, d = make_tools()
         t.cfg.auto_approve = False
-        t._confirm = lambda action: False
+        t._confirm = lambda action, *_: False
         (d / "a.py").write_text("x = 1\n")
         out = t.run("apply_patch", {"edits": [
             {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"},
@@ -90,7 +90,7 @@ class DiffPreviewTest(unittest.TestCase):
     def test_edit_shows_diff_of_the_change(self):
         t, d = make_tools()
         t.cfg.auto_approve = False
-        t._confirm = lambda action: True
+        t._confirm = lambda action, *_: True
         calls = self._capture(t)
         (d / "a.py").write_text("x = 1\n")
         t.run("edit_file", {"path": "a.py", "old_str": "x = 1", "new_str": "x = 2"})
@@ -99,7 +99,7 @@ class DiffPreviewTest(unittest.TestCase):
     def test_write_shows_old_vs_new(self):
         t, d = make_tools()
         t.cfg.auto_approve = False
-        t._confirm = lambda action: True
+        t._confirm = lambda action, *_: True
         calls = self._capture(t)
         (d / "a.py").write_text("old\n")
         t.run("write_file", {"path": "a.py", "content": "new\n"})
@@ -108,7 +108,7 @@ class DiffPreviewTest(unittest.TestCase):
     def test_apply_patch_shows_one_diff_per_file(self):
         t, d = make_tools()
         t.cfg.auto_approve = False
-        t._confirm = lambda action: True
+        t._confirm = lambda action, *_: True
         calls = self._capture(t)
         (d / "a.py").write_text("x = 1\n")
         t.run("apply_patch", {"edits": [

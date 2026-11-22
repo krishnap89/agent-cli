@@ -19,9 +19,10 @@ from typing import Callable, List, Optional
 import typer
 
 from . import redact
-from .agent import THINK_RE, parse_action_calls, parse_tool_calls, render_tool_docs
+from .agent import (THINK_RE, parse_action_calls, parse_tool_calls, render_tool_docs,
+                    response_tag, strip_thinking)
 from .config import ACTION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, SYSTEM_PROMPT, Config
-from .llm import _parse_full, clean_content, iter_stream_events, list_models, open_stream
+from .llm import CUT_OFF_REASONS, _parse_full, clean_content, iter_stream_events, list_models, open_stream
 
 app = typer.Typer(add_completion=False)
 
@@ -51,7 +52,7 @@ def defaults(cfg: Config) -> dict:
         "presets": {
             "none": {"system": "", "stop": ""},
             "chat": {"system": CHAT_SYSTEM_PROMPT, "stop": ""},
-            "agent": {"system": agent, "stop": "<tool_response>"},
+            "agent": {"system": agent, "stop": f"<{response_tag(cfg)}>"},
         },
     }
 
@@ -101,9 +102,11 @@ def build_request(base: Config, data: dict) -> tuple:
 
 def inspect_reply(cfg: Config, content: str, reasoning: str, finish: str, native: list) -> dict:
     """What the agent would make of this reply, plus anything that looks wrong."""
-    text = THINK_RE.sub("", clean_content(content)).strip()
-    parse = parse_action_calls if cfg.tool_format == "action" else parse_tool_calls
-    calls, errors = parse(text)
+    text = strip_thinking(clean_content(content), cfg.tool_format)
+    if cfg.tool_format == "action":
+        calls, errors = parse_action_calls(text, finish in CUT_OFF_REASONS)
+    else:
+        calls, errors = parse_tool_calls(text, finish in CUT_OFF_REASONS)
     warnings = list(errors)
     for call in native:
         args = call["arguments"]
@@ -117,7 +120,7 @@ def inspect_reply(cfg: Config, content: str, reasoning: str, finish: str, native
         warnings.append("Only thinking, no answer" if thought else "Empty reply")
     if finish == "length":
         warnings.append(f"Cut off at max_tokens={cfg.max_tokens}")
-    elif not finish:
+    elif finish in ("", "incomplete"):
         warnings.append("No finish_reason: the reply may be incomplete")
     return {"cleaned": text, "tool_calls": calls, "native_tool_calls": native, "warnings": warnings}
 
@@ -176,6 +179,8 @@ def run(cfg: Config, messages: list, stop: List[str], send: Callable[[dict], Non
                     # Tool deltas are sent too, so a closed browser is noticed during them.
                     send({"type": "delta", "kind": kind, "text": value if kind != "tool" else ""})
                 native = [slots[i] for i in sorted(slots)]
+                if not finish and not {"data: [DONE]", "data:[DONE]"} & {r.strip() for r in raw}:
+                    finish = "incomplete"  # as the agent sees it
             else:
                 body = resp.read().decode("utf-8", errors="replace")
                 raw.append(body)

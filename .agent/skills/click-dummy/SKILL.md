@@ -27,25 +27,11 @@ build step, no real data, no persistence. Just screens you can click through.
 
 ## Output contract
 
-Produce **one single self-contained `.html` file**. The ONLY way to create it
-is to emit a `write_file` tool call. The whole HTML document goes inside the
-tool call's `content` field — NOT in a ```html code block, NOT in prose. A code
-block in your reply does nothing: the file is written only when the agent runs
-the tool call below. So your reply contains exactly one such tool call and no
-HTML anywhere else.
-
-Emit it in this exact format (this is the first and main thing you do — do it
-before writing any report, and never say the file was created unless you have
-actually emitted this call):
-
-    <tool_call>
-    {"name": "write_file", "arguments": {"path": "click-dummy/<feature-slug>.html", "content": "<!DOCTYPE html>\n<html>...the full document, with every newline and quote JSON-escaped...\n</html>"}}
-    </tool_call>
-
-The `content` string must be valid JSON: escape every `"` as `\"` and every
-newline as `\n`. After the tool call runs you will get a `<tool_response>`
-confirming the write — only then write a one-line report. The file must open
-directly in a browser with no server and no build.
+Produce **one single self-contained `.html` file** at
+`click-dummy/<feature-slug>.html`, created with `write_file` in the format your
+system prompt gives. HTML printed in your reply or in a code block is not saved.
+Write the file first, report in one line only after the result confirms it. The
+file must open directly in a browser with no server and no build.
 
 - **Styling:** Tailwind via CDN — `<script src="https://cdn.tailwindcss.com"></script>`.
   No other dependencies, no local assets, no external images.
@@ -73,14 +59,12 @@ state your assumptions in the final report, after the file is written.
 1. **Infer the flow silently.** From the request, decide the feature's name, the
    screens, and the click path. Fill any gap with an obvious default — do not ask
    and do not narrate a plan first.
-2. **Emit the `write_file` tool call** (format above) as your main action. Build
-   the full HTML inside its `content`: all screens as sibling `<section>`s, the
+2. **Write the file** with `write_file`: all screens as sibling `<section>`s, the
    top bar, the `show(id)` switcher, every button wired to a real `show(...)` so
-   nothing dead-ends. Do not print the HTML anywhere outside the tool call.
-3. **Wait for the `<tool_response>`.** Only after it confirms the write do you
-   reply — one short line: the file path, the screen list, "open it in a browser."
-   If no tool response came back, the file was NOT written: emit the tool call
-   again. Never report success without a confirming tool response.
+   nothing dead-ends.
+3. **Wait for the result.** Once it confirms the write, reply with one short line:
+   the file path, the screen list, "open it in a browser." Without that
+   confirmation the file was NOT written: write it again.
 
 ## The switcher (use this pattern)
 

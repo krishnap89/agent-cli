@@ -14,6 +14,7 @@ from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_P
 from .review import collect_material, material_branch_note, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
 from .turns import prompt_header
+from .term import safe_markup
 from .writing import handle as handle_writing
 
 cli = typer.Typer(add_completion=False)
@@ -120,7 +121,7 @@ def main(
             skill_text = format_skill_context(skill, cfg.skill_chars)
             parts.append("\n\n" + skill_text)
             if pinned_skill is None:
-                console.print(f"[dim]Skill: {skill.name}[/dim]")
+                console.print(f"[dim]Skill: {safe_markup(skill.name)}[/dim]")
         return "".join(parts)
 
     def _route_or_ask(text: str) -> None:

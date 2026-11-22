@@ -64,6 +64,17 @@ class _Retryable(Exception):
 
 
 # Control tokens that can appear once special tokens are kept.
+# A complete action-format write_file or edit_file block. Its body is file content,
+# so the reply clean-up (control tokens, thinking tags) must not touch it.
+ACTION_BLOCK = (r"(?ms:(?:^|(?<=</think>))[ \t]*ACTION[ \t]+(?:"
+                r"write_file\b[^\n]*\n(?:[ \t\r]*\n)*"
+                r"[ \t]*<<<CONTENT[ \t\r]*\n.*?^CONTENT>>>[ \t\r]*$"
+                r"|edit_file\b[^\n]*\n(?:[ \t\r]*\n)*"
+                r"[ \t]*<<<OLD[ \t\r]*\n.*?^OLD[ \t\r]*\n(?:[ \t\r]*\n)*"
+                r"[ \t]*<<<NEW[ \t\r]*\n.*?^NEW[ \t\r]*$))")
+# finish_reason values of a reply that ended early. "incomplete" is ours: the
+# stream closed with neither a finish_reason nor [DONE].
+CUT_OFF_REASONS = ("length", "max_tokens", "incomplete")
 _CONTROL_TOKENS_RE = re.compile(r"<\|(?:im_end|im_start|endoftext|end_of_text|eot_id)\|>")
 
 
@@ -114,9 +125,11 @@ def build_payload(cfg: Config, messages: list, stop: Optional[List[str]] = None,
 
 def clean_content(content: str) -> str:
     """Strip control tokens and leaked <think> text from a completed reply."""
-    content = _CONTROL_TOKENS_RE.sub("", content or "")
-    if "</think>" in content and "<think>" not in content:
-        content = content.split("</think>", 1)[1]  # thinking leaked into content
+    content = re.sub(f"({ACTION_BLOCK})|{_CONTROL_TOKENS_RE.pattern}",
+                     lambda m: m.group(1) or "", content or "")
+    tags = [m for m in re.finditer(f"({ACTION_BLOCK})|</?think>", content) if not m.group(1)]
+    if tags and all(m.group() == "</think>" for m in tags):
+        content = content[tags[0].end():]  # thinking leaked into content
     return content
 
 
@@ -264,7 +277,15 @@ def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
     content, reasoning, finish = [], [], ""
     n_content = n_reasoning = 0
     tools = {}  # index -> {"name": str, "arguments": str}, built up from deltas
-    for kind, value in iter_stream_events(cfg, resp):
+    done = False
+
+    def watched():
+        nonlocal done
+        for raw in resp:
+            done = done or raw.strip() in (b"data: [DONE]", b"data:[DONE]")
+            yield raw
+
+    for kind, value in iter_stream_events(cfg, watched()):
         if kind == "content":
             content.append(value)
             n_content += len(value)
@@ -288,6 +309,8 @@ def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
                 on_progress("calling a tool", len(tools))
         elif kind == "finish":
             finish = value
+    if not finish and not done:
+        finish = "incomplete"
     calls = [tools[i] for i in sorted(tools)]
     return Reply("".join(content), finish, "".join(reasoning), calls)
 

@@ -36,7 +36,7 @@ written to `.agent-cache/plans/<slug>.md`.
    - leaves the build green on its own (no "fix it in step 5")
    - has its own check command
    - order by dependency: shared types/interfaces first, callers after
-5. Mirror the subtasks with the `todo` tool, show the plan, and wait for the
+5. Mirror the subtasks with `todo`, show the plan, and wait for the
    user to confirm if there are more than 5 subtasks.
 
 ## Phase 2 — Execute one subtask at a time
@@ -52,7 +52,7 @@ For the first unchecked subtask:
    subtask needs (renamed symbol, new function signature, chosen approach).
 6. Update `todo`, then report in one line: `Done 3/8: <goal>. Next: <goal>.`
 
-After 2–3 subtasks, or when tool output has been large, stop and tell the user:
+After 2–3 subtasks, or when output has been large, stop and tell the user:
 "Type /clear then 'resume <slug>' to continue with a fresh context."
 
 ## Context hygiene

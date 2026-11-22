@@ -83,7 +83,7 @@ class Config:
     notes_enabled: bool = os.getenv("AGENT_NOTES", "1") not in ("0", "false")
     notes_file: str = os.getenv("AGENT_NOTES_FILE", "")
     notes_chars: int = int(os.getenv("AGENT_NOTES_CHARS", "3000"))
-    skill_chars: int = int(os.getenv("AGENT_SKILL_CHARS", "3000"))
+    skill_chars: int = int(os.getenv("AGENT_SKILL_CHARS", "4000"))
     # Jira Cloud (read-only). When all three are set, the jira_issue and
     # jira_search tools are offered to the model; otherwise they stay hidden.
     # The token is an API token from id.atlassian.com -> Security -> API tokens.
@@ -154,25 +154,38 @@ Rules:
 # that return empty content for the <tool_call> XML form (e.g. Nemotron). The
 # model names a tool and its arguments on an ACTION line; the agent parses the
 # line and runs the tool, so no JSON or special-token markup is needed.
+# Text sent to the model in this format says "action", never "tool".
 ACTION_SYSTEM_PROMPT = """You are a coding agent running in the user's terminal.
 Your working directory is the project root. Use paths relative to it.
 
-# Tools
-You can use these tools:
+# Actions
+You can use these actions:
 
 {tool_docs}
 
-# How to use a tool
-You cannot run anything yourself. To use a tool, write an ACTION line: the word
-ACTION, then the tool name, then each argument as key=value, all on one line.
+# How to use an action
+You cannot run anything yourself. To use an action, write an ACTION line: the word
+ACTION, then the action name, then each argument as key=value, all on one line.
 
 ACTION list_dir path=.
 ACTION read_file path=app/build.gradle.kts start_line=1 end_line=80
 ACTION search pattern=LoginViewModel
 ACTION run_command command=./gradlew :app:assembleDebug
 
+For write_file, put only path= on the ACTION line and the whole file in a CONTENT
+block below it. Write the file as is: no escaping and no code fence. Both markers
+start at the beginning of their line.
+
+ACTION write_file path=docs/setup.md
+<<<CONTENT
+# Setup
+
+Run ./gradlew build
+CONTENT>>>
+
 For edit_file, put the exact text to replace and its replacement in OLD/NEW
-blocks on the lines right after the ACTION line (path= is the only key=value):
+blocks on the lines right after the ACTION line (path= is the only key=value).
+All four markers start at the beginning of their line:
 
 ACTION edit_file path=app/src/main/java/com/example/Login.kt
 <<<OLD
@@ -182,18 +195,18 @@ OLD
 val timeout = 60
 NEW
 
-For tools whose value is a list (apply_patch, todo), pass a single arg= holding
+For actions whose value is a list (apply_patch, todo), pass a single arg= holding
 inline JSON for that one argument:
 
 ACTION todo arg={{"action": "set", "items": [{{"text": "read login flow", "status": "in_progress"}}]}}
 ACTION apply_patch arg=[{{"path": "a.kt", "old_str": "x", "new_str": "y"}}]
 
 Rules:
-- Put ACTION lines and their OLD/NEW blocks by themselves. You may emit several
+- Put ACTION lines and their blocks by themselves. You may emit several
   ACTION lines in one reply; each runs and its result comes back next message.
 - Values with spaces are fine: everything after the first = up to the end of the
-  line (or the next key= for simple tools) is the value. Do not add quotes.
-- Never write a tool result yourself or guess what a tool returns.
+  line (or the next key= for simple actions) is the value. Do not add quotes.
+- Never write an action result yourself or guess what an action returns.
 - When the task is done, reply in plain prose with NO ACTION line. That ends
   your turn.
 
@@ -205,7 +218,7 @@ Rules:
 - For big files, use outline first, then read_file with start_line/end_line.
 - Prefer small edits with edit_file over rewriting whole files.
 - After changing code, run tests or the program to verify when possible.
-- When asked how something works, use tools to find and read the code first.
+- When asked how something works, use actions to find and read the code first.
   Never answer from memory alone.
 - Keep the final answer short: what you changed and why.
 """
