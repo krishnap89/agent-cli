@@ -149,7 +149,7 @@ def main(
                   "/analyze <request> = read-only code analysis doc, "
                   "/review [target] = code review, "
                   "/test-gen <class> = generate tests, /doc <target> = generate docs, "
-                  "/map [query] = repo map, /notes = show notes, /skills = list skills, "
+                  "/map [query] = build repo map, /notes = show notes, /skills = list skills, "
                   "/model [name] = switch model, /clear = reset, /exit = quit.\n"
                   "Writing: /grammar, /rephrase, /tone <style>, /email, /slack — each takes text "
                   '(inline or a """ block).\n'
@@ -181,8 +181,20 @@ def main(
             continue
         if text.startswith("/map"):
             query = text[4:].strip()
-            console.print(agent.tools.ensure_map().render(query=query, budget=cfg.map_chars),
-                          markup=False, highlight=False)
+            try:
+                rm = agent.load_map()
+                console.print(rm.render(query=query, budget=cfg.map_chars), markup=False, highlight=False)
+            except KeyboardInterrupt:
+                console.print("\n[yellow]Interrupted.[/yellow]")
+                continue
+            if rm.files:
+                if not cfg.use_map:
+                    note = "not added to the model's context (AGENT_MAP=0)"
+                elif agent.chat_only:
+                    note = "the model gets it when you switch to /agent"
+                else:
+                    note = "added to the model's context; run /map again to refresh"
+                console.print(f"[dim]Repo map: {len(rm.files)} files indexed, {note}.[/dim]")
             continue
         if text.startswith("/review"):
             target = text[7:].strip()

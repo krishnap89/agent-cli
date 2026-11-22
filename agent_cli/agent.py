@@ -11,6 +11,7 @@ from .config import (ACTION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION,
 from .llm import ACTION_BLOCK, CUT_OFF_REASONS, XML_CALL, XML_LITERAL, LLMError, chat
 from .mathtext import plain_math
 from .notes import load_notes
+from .repomap import RepoMap
 from .term import safe_markup, safe_text
 from .tools import TOOL_SCHEMAS, JIRA_TOOL_SCHEMAS, Tools
 from .jira import is_configured as is_jira_configured
@@ -618,12 +619,16 @@ class Agent:
     def __init__(self, cfg: Config, chat_only: bool = False):
         self.cfg = cfg
         self.tools = Tools(cfg)
+        self._map_text = ""  # stays empty until /map: startup never indexes
         self.set_mode(chat_only)
 
     def set_mode(self, chat_only: bool) -> None:
         """Switch between agent mode (tools) and chat-only mode. Clears history."""
         self.chat_only = chat_only
-        if chat_only:
+        self.messages: list[dict] = [{"role": "system", "content": self._system_prompt()}]
+
+    def _system_prompt(self) -> str:
+        if self.chat_only:
             system = CHAT_SYSTEM_PROMPT
         else:
             template = (ACTION_SYSTEM_PROMPT if self.cfg.tool_format == "action"
@@ -637,18 +642,20 @@ class Agent:
                                            self.cfg.notes_chars, warn_once=True)
                 if notes_text:
                     system += "\n# Project notes\n" + notes_text + "\n"
-        self.messages: list[dict] = [{"role": "system", "content": system}]
+        return system
 
     def _repo_map_section(self) -> str:
-        """Built once per session so the system prompt stays the same (good for caching)."""
-        if not self.cfg.use_map:
-            return ""
-        if not hasattr(self, "_map_text"):
-            with console.status("[dim]indexing codebase for repo map...[/dim]"):
-                rm = self.tools.ensure_map()
-                self._map_text = rm.render(budget=self.cfg.map_chars)
-                console.print(f"[dim]Repo map: {len(rm.files)} files indexed.[/dim]")
-        return REPO_MAP_SECTION.format(repo_map=self._map_text)
+        """Changes only on /map, so the system prompt stays the same (good for caching)."""
+        return REPO_MAP_SECTION.format(repo_map=self._map_text) if self._map_text else ""
+
+    def load_map(self) -> RepoMap:
+        """/map: index the repo and put its map in the system prompt, keeping history."""
+        rm = self.tools.ensure_map()
+        if self.cfg.use_map and rm.files:
+            # never the /map query: the prompt serves the whole session
+            self._map_text = rm.render(budget=self.cfg.map_chars)
+            self.messages[0]["content"] = self._system_prompt()
+        return rm
 
     @property
     def mode_name(self) -> str:

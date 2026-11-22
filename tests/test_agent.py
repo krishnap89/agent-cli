@@ -17,6 +17,63 @@ from agent_cli.llm import Reply
 from agent_cli.skills import format_skill_context, load_skills
 
 
+class RepoMapOnDemandTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        (self.root / "billing.py").write_text("def total_price():\n    return 1\n")
+
+    def agent(self, use_map=True, chat_only=False, fmt="xml"):
+        cfg = Config(workdir=self.root, use_map=use_map, notes_enabled=False, tool_format=fmt)
+        return Agent(cfg, chat_only=chat_only)
+
+    def test_start_and_mode_switch_do_not_index(self):
+        with mock.patch("agent_cli.repomap.RepoMap.build") as build:
+            agent = self.agent()
+            agent.set_mode(True)
+            agent.set_mode(False)
+        build.assert_not_called()
+        self.assertNotIn("# Repo map", agent.messages[0]["content"])
+
+    def test_map_joins_prompt_and_keeps_history(self):
+        for fmt in ("xml", "action"):
+            agent = self.agent(fmt=fmt)
+            agent.messages.append({"role": "user", "content": "hi"})
+            agent.load_map()
+            self.assertIn("total_price", agent.messages[0]["content"])
+            self.assertEqual(agent.messages[1:], [{"role": "user", "content": "hi"}])
+            agent.reset()
+            self.assertIn("total_price", agent.messages[0]["content"])
+
+    def test_map_again_refreshes(self):
+        agent = self.agent()
+        agent.load_map()
+        (self.root / "shipping.py").write_text("def ship_order():\n    return 2\n")
+        agent.load_map()
+        system = agent.messages[0]["content"]
+        self.assertIn("ship_order", system)
+        self.assertEqual(system.count("# Repo map"), 1)
+
+    def test_map_in_chat_waits_for_agent_mode(self):
+        agent = self.agent(chat_only=True)
+        agent.load_map()
+        self.assertNotIn("total_price", agent.messages[0]["content"])
+        agent.set_mode(False)
+        self.assertIn("total_price", agent.messages[0]["content"])
+
+    def test_map_off_stays_out_of_prompt(self):
+        agent = self.agent(use_map=False)
+        self.assertTrue(agent.load_map().files)
+        self.assertNotIn("# Repo map", agent.messages[0]["content"])
+
+    def test_empty_repo_adds_nothing(self):
+        (self.root / "billing.py").unlink()
+        agent = self.agent()
+        agent.load_map()
+        self.assertNotIn("# Repo map", agent.messages[0]["content"])
+
+
 class ParseToolCallsTest(unittest.TestCase):
     def test_wrapped_json(self):
         calls, errors = parse_tool_calls(

@@ -136,7 +136,7 @@ AGENT_COMMANDS = [
     ("/agent", "use tools"),
     ("/review", "code review [target]"),
     ("/debt", "list shortcut: comments by file"),
-    ("/map", "repo map [query]"),
+    ("/map", "build repo map [query]"),
     ("/notes", "show project notes"),
     ("/skills", "list skills"),
     ("/skill", "pin a skill [name|off]"),

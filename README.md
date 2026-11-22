@@ -22,6 +22,7 @@ system prompt and the agent parses `<tool_call>` blocks from plain text.
     agent -u http://gpu-box:8000/v1 -m qwen -y "run the tests and fix failures"
 
 In the REPL: /chat and /agent switch modes, /clear resets, /exit quits.
+`agent` does not index the folder when it starts; run /map when you want the repo map.
 Multi-line: pasted text is kept together (press Enter on an empty line to send),
 or type """ on its own line to start and end a multi-line message.
 
@@ -604,10 +605,18 @@ Same security model as agent-ui: 127.0.0.1 only, random token, and the API key
 stays in the Python process.
 
 ## Repo map
-Both commands index the codebase into a ranked outline (files, classes,
-functions, line numbers). See it with `agent --map "query"` or /map in either
-REPL. Cached in .agent-cache/ (add it to .gitignore). AGENT_MAP=0 disables it,
-AGENT_MAP_CHARS (default 4000) sets its size.
+A ranked outline of the codebase (files, classes, functions, line numbers).
+
+- `agent` does not build it at startup. Run `/map [query]` to build it, print it
+  and add it to the model's context for the rest of the session (history is
+  kept); run it again to refresh. The query only focuses what is printed.
+  Without /map, the repo_map, outline and dependency_graph tools still index
+  when the model calls them, and so do /micro, /analyze, /test-gen and /doc.
+- `coder` and `agent-ui` build it at startup; /map shows it.
+- `agent --map "query"` (or `--map ""`) builds it, prints it and exits.
+
+Cached in .agent-cache/ (add it to .gitignore). AGENT_MAP=0 keeps it out of the
+prompt, AGENT_MAP_CHARS (default 4000) sets its size.
 
 Kotlin, Swift and Java are parsed with tree-sitter when the optional grammars are
 installed (`pip install ".[treesitter]"`), which gives exact classes, methods,

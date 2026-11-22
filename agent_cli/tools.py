@@ -231,7 +231,8 @@ class Tools:
 
     def ensure_map(self) -> RepoMap:
         """Build (or refresh from cache) the repo map; cheap after the first time."""
-        self.repo_map.build()
+        with console.status("[dim]indexing codebase for repo map...[/dim]"):
+            self.repo_map.build()
         self._map_built = True
         return self.repo_map
 
