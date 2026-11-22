@@ -20,6 +20,7 @@ from typing import Callable, List, Optional
 
 from rich.console import Console
 
+from ..mathtext import plain_math
 from .analysis import AnalysisOrchestrator
 from .roles import Planner, PlanStep, RoleError
 
@@ -98,7 +99,7 @@ class JiraPlanOrchestrator:
     def _print_plan(self, key: str, steps: List[PlanStep]) -> None:
         console.print(f"\n[green]{len(steps)} subtask(s) for {key}:[/green]")
         for i, step in enumerate(steps, 1):
-            console.print(f"[bold]{i}.[/bold] {step.summary}")
+            console.print(f"[bold]{i}.[/bold] {plain_math(step.summary)}")
             if step.files:
                 console.print(f"   [dim]{', '.join(step.files)}[/dim]")
         console.print(f"\n[dim]Read-only plan. Run /micro to implement a step, or "

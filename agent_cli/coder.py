@@ -28,6 +28,7 @@ from .android import (
 )
 from .checks import builtin_lint, custom_lint, ext_lint_cmd, relative_paths, run_tests, truncate_output
 from .config import Config, UNLIMITED_CHARS
+from .mathtext import plain_math
 from .notes import find_notes, gather_init_info, load_notes, notes_exist, INIT_PROMPT
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display, Skill
 from .review import (
@@ -566,6 +567,14 @@ class Coder:
     def _display(self, text: str) -> None:
         """Show prose as markdown and edit blocks as compact syntax-highlighted code."""
         lines, out, i = text.splitlines(), [], 0
+        # Convert math now: _show_prose drops the fences that mark code. Edit
+        # blocks are blanked first, so a fence inside one can't hide the prose after it.
+        masked, in_block = [], False
+        for line in lines:
+            in_block = in_block or bool(HEAD_RE.match(line))
+            masked.append("" if in_block else line)
+            in_block = in_block and not UPDATED_RE.match(line)
+        prose = plain_math("\n".join(masked)).split("\n")
         while i < len(lines):
             if HEAD_RE.match(lines[i]):
                 if out:
@@ -579,7 +588,7 @@ class Coder:
                     i += 1
                 console.print(Syntax("\n".join(block), "diff", theme="ansi_dark", word_wrap=True))
             else:
-                out.append(lines[i])
+                out.append(prose[i])
             i += 1
         if out:
             self._show_prose(out)
@@ -588,7 +597,7 @@ class Coder:
         text = "\n".join(lines)
         text = re.sub(r"(?m)^\s*(```|~~~)[\w+-]*\s*$\n?", "", text)  # fences around blocks
         if text.strip():
-            show(text.strip())
+            show(text.strip(), math=False)
 
     def _offer_mentioned_files(self, reply: str, user_text: str, applied: bool) -> None:
         """If the model names repo files that aren't in the chat, offer to add them."""

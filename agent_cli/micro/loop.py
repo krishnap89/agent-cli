@@ -26,6 +26,7 @@ from rich.markup import escape
 
 from .. import redact
 from ..editblock import unified_diff
+from ..mathtext import plain_math
 from ..risk import CheckFacts, callers_not_updated, is_graph_file, risk_note
 from .checker import Checker, CheckResult
 from .modelpick import model_for
@@ -196,7 +197,7 @@ class MicroOrchestrator:
             return False
 
         for i, step in enumerate(steps, 1):
-            console.print(f"[dim]Step {i}/{len(steps)}: {step.summary}[/dim]")
+            console.print(f"[dim]Step {i}/{len(steps)}: {plain_math(step.summary)}[/dim]")
             if not self._run_step(step, changed):
                 break  # a hard stop inside the step (bad format or repeated error)
 
@@ -448,7 +449,7 @@ class MicroOrchestrator:
         if ok:
             console.print("[dim]Reviewer: OK[/dim]")
         else:
-            console.print(f"[yellow]Reviewer flagged: {notes or '(no note)'}[/yellow]")
+            console.print(f"[yellow]Reviewer flagged: {plain_math(notes or '(no note)')}[/yellow]")
         return ok, notes
 
     # ---- finish: undo snapshot + Summarizer ----
@@ -472,7 +473,7 @@ class MicroOrchestrator:
             summary, _ = self.summarizer.run(request=request, diff=combined)
         except RoleError:
             summary = f"Changed {len(changed)} file(s): {', '.join(changed)}."
-        console.print(f"\n[green]{summary}[/green]")
+        console.print(f"\n[green]{plain_math(summary)}[/green]")
         model_line = "; ".join(dict.fromkeys(self._model_risks))
         try:
             note = risk_note(self._check_facts(), callers_not_updated(self.root, changed), model_line)

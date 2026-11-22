@@ -15,6 +15,7 @@ from typing import Optional
 from rich.console import Console
 
 from .config import Config
+from .mathtext import plain_math
 
 console = Console()
 
@@ -70,6 +71,8 @@ def _run(cfg: Config, system: str, text: str) -> None:
         return
     result = THINK_RE.sub("", reply.content).strip()
     if result:
+        if plain_math(text) == text:  # LaTeX the user wrote is theirs to keep
+            result = plain_math(result)
         console.print(result, markup=False, highlight=False)
     else:
         console.print("[yellow]Empty reply from the model.[/yellow]")

@@ -9,6 +9,7 @@ from .checks import relative_paths
 from .config import (ACTION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION,
                      Config, SYSTEM_PROMPT)
 from .llm import ACTION_BLOCK, CUT_OFF_REASONS, XML_CALL, XML_LITERAL, LLMError, chat
+from .mathtext import plain_math
 from .notes import load_notes
 from .term import safe_markup, safe_text
 from .tools import TOOL_SCHEMAS, JIRA_TOOL_SCHEMAS, Tools
@@ -58,7 +59,7 @@ def thinking_gist(reasoning: str, content: str) -> str:
         if not _THINK_LEADIN_RE.match(ln):
             gist = ln
             break
-    gist = " ".join(gist.split())  # collapse whitespace
+    gist = " ".join(plain_math(gist).split())  # collapse whitespace
     if len(gist) > 140:
         gist = gist[:137].rstrip() + "..."
     return gist
@@ -67,9 +68,12 @@ def thinking_gist(reasoning: str, content: str) -> str:
 CODE_RE = re.compile(r"(```[\s\S]*?(?:```|$)|`[^`\n]*`)")
 
 
-def show(text: str) -> None:
+def show(text: str, math: bool = True) -> None:
     """Print as markdown. rich silently drops HTML-like text (e.g. <div>),
-    so escape '<' everywhere except inside code, where it already shows fine."""
+    so escape '<' everywhere except inside code, where it already shows fine.
+    math=False is for text that has already been through plain_math."""
+    if math:
+        text = plain_math(text)
     parts = CODE_RE.split(safe_text(text))
     safe = "".join(p if i % 2 else p.replace("<", "&lt;") for i, p in enumerate(parts))
     console.print(Markdown(safe))
