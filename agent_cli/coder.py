@@ -5,8 +5,10 @@ Workflow (same idea as Aider):
 - A repo map summarises the rest of the codebase so the model knows what exists.
 - The model edits by writing SEARCH/REPLACE blocks in plain text (no tool calling).
 - Edits are applied immediately; failed blocks are sent back for the model to fix.
+- /cd switches folder; each folder keeps its own session.
 - /undo reverts the last set of edits, /run runs a command and can share its output.
 """
+import dataclasses
 import fnmatch
 import glob
 import re
@@ -36,6 +38,7 @@ from .review import (
     build_review_messages, build_merge_messages, needs_split, REVIEW_SYSTEM,
     branching_without_tests, branching_note, material_branch_note,
 )
+from .folders import Folders
 from .editblock import EditBlock, EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
 from .input_reader import read_message, set_completer
 from .intent import route as route_intent
@@ -50,7 +53,7 @@ from .testgen import (
     collect_context, find_test_examples, find_test_helpers, test_file_path,
     build_plan_prompt, build_write_prompt, compile_test_task, run_test_task,
     find_junit_xml, parse_junit_xml, format_report, parse_bug_classifications,
-    _package_from_file, KIND_RULES,
+    _package_from_file,
 )
 from .version import VERSION_OPTION
 
@@ -180,6 +183,7 @@ HELP = """Commands:
   /jira-plan <KEY>     read-only: read a Jira issue and list ordered subtasks
   /diff                show the last edits
   /undo                undo the last edits
+  /cd [folder]         switch folder by path, number or name (no args = recent folders)
   /run <command>       run a command; optionally share output with the model
   /lint [files]        run lint on files (default: all editable files)
   /test                run AGENT_TEST_CMD and show results
@@ -264,7 +268,7 @@ class Coder:
     def add(self, patterns: List[str], read_only: bool = False) -> None:
         target = self.read_only if read_only else self.editable
         for pat in patterns:
-            matches = sorted(glob.glob(str(self.root / pat), recursive=True))
+            matches = sorted(glob.glob(str(Path(glob.escape(str(self.root))) / pat), recursive=True))
             matches = [m for m in matches if Path(m).is_file()]
             if not matches:
                 if not read_only and not any(c in pat for c in "*?["):
@@ -1007,8 +1011,6 @@ class Coder:
             if h["kind"] == "dispatcher-rule":
                 dispatcher_setup = f"@get:Rule val {h['name'].lower()} = {h['name']}()"
                 break
-        if kind == "viewmodel" and kind in KIND_RULES:
-            KIND_RULES["viewmodel"] = KIND_RULES["viewmodel"].replace("{dispatcher_setup}", dispatcher_setup)
 
         # Notes
         notes_text = ""
@@ -1027,6 +1029,7 @@ class Coder:
                 self.root, rel, class_name, method, kind, setup,
                 examples, helpers, notes_text, existing_test,
                 repo_map_files, self.cfg.context_chars,
+                dispatcher_setup=dispatcher_setup,
             )
             for src in extra_sources:
                 if redact.check_file(self.root, src):
@@ -1651,7 +1654,9 @@ def main(
         _do_init_notes(cfg)
         return
 
-    coder = Coder(cfg, mode="ask" if ask else "code")
+    start_mode = "ask" if ask else "code"
+    base_cfg = dataclasses.replace(cfg)  # for /cd: Coder() changes cfg for its own folder
+    coder = Coder(cfg, mode=start_mode)
     if files:
         coder.add(files)
     if read:
@@ -1696,17 +1701,22 @@ def main(
             total, _ = coder.repo_map.build()
         console.print(f"[dim]Repo map: {total} files. Type /help for commands.[/dim]")
     coder.list_files()
-    try:
-        from .completer import CoderCompleter
-        set_completer(CoderCompleter(coder))
-    except ImportError:
-        pass
+
+    def use_completer() -> None:
+        try:
+            from .completer import CoderCompleter
+            set_completer(CoderCompleter(coder))
+        except ImportError:
+            pass
+
+    use_completer()
+    folders = Folders(base_cfg, coder, lambda c: Coder(c, mode=start_mode))
     console.print()
 
     while True:
         n = len(coder.editable) + len(coder.read_only)
         color = "green" if coder.mode == "code" else "blue"
-        prompt = f"[bold {color}]{coder.mode}[/bold {color}][dim] ({n} file{'s' if n != 1 else ''})[/dim] › "
+        prompt = f"[bold {color}]{coder.mode}[/bold {color}][dim] {folders.label} ({n} file{'s' if n != 1 else ''})[/dim] › "
         try:
             text = read_message(prompt).strip()
         except (EOFError, KeyboardInterrupt):
@@ -1721,6 +1731,14 @@ def main(
                 break
             elif cmd == "/help":
                 console.print(HELP, markup=False, highlight=False)
+            elif cmd == "/cd":
+                switched = folders.cd(arg)
+                if switched:
+                    coder, cfg = switched, switched.cfg
+                    use_completer()
+                    coder.list_files()
+            elif folders.is_missing():
+                pass  # everything below needs the folder
             elif cmd == "/add":
                 coder.add(args)
             elif cmd == "/read":
@@ -1831,7 +1849,7 @@ def main(
                 tg_target = parts[0] if parts else ""
                 tg_method = parts[1] if len(parts) > 1 else ""
                 if not tg_target:
-                    console.print("[yellow]Usage: /test-gen <class|file> [method][/yellow]")
+                    console.print("[yellow]Usage: /test-gen <class|file> \\[method][/yellow]")
                 else:
                     coder.test_gen(tg_target, tg_method)
             elif cmd == "/doc":

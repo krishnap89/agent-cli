@@ -588,6 +588,7 @@ def collect_context(
     existing_test_path: Optional[str],
     repo_map_files: Dict[str, Any],
     budget: int,
+    dispatcher_setup: str = "",
 ) -> Tuple[str, List[str]]:
     """Build the context string for the model, within budget.
 
@@ -630,6 +631,8 @@ def collect_context(
 
     # Kind-specific rules
     rule = KIND_RULES.get(kind, KIND_RULES["plain"])
+    if dispatcher_setup:
+        rule = rule.replace("{dispatcher_setup}", dispatcher_setup)
     parts.append(f"# Class kind: {kind}\nRule: {rule}")
 
     # Style examples

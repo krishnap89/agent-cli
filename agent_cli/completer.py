@@ -12,7 +12,7 @@ if TYPE_CHECKING:
     from .coder import Coder
 
 ALL_COMMANDS = [
-    "/add", "/ask", "/autotest", "/check", "/clear", "/code", "/compile",
+    "/add", "/ask", "/autotest", "/cd", "/check", "/clear", "/code", "/compile",
     "/debt", "/diff", "/doc", "/drop", "/exit", "/help", "/lint", "/ls", "/map",
     "/mode", "/model", "/modules", "/notes", "/quit", "/read", "/reset", "/review",
     "/run", "/skill", "/skills", "/test", "/test-gen", "/tokens", "/undo",
@@ -134,6 +134,7 @@ def _match(candidates: List[str], prefix: str) -> Iterable[Completion]:
 AGENT_COMMANDS = [
     ("/chat", "chat only, no tools"),
     ("/agent", "use tools"),
+    ("/cd", "switch folder [path|number|name]"),
     ("/review", "code review [target]"),
     ("/debt", "list shortcut: comments by file"),
     ("/map", "build repo map [query]"),

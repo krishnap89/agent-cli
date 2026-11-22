@@ -134,7 +134,7 @@ def _expand_file_args(root: Path, target: str) -> List[str]:
     parts = target.split()
     result = []  # type: List[str]
     for pat in parts:
-        matches = sorted(glob.glob(str(root / pat), recursive=True))
+        matches = sorted(glob.glob(str(Path(glob.escape(str(root))) / pat), recursive=True))
         matches = [m for m in matches if Path(m).is_file() and not _is_binary(Path(m))]
         for m in matches:
             p = Path(m).resolve()
@@ -154,7 +154,7 @@ def _collect_uncommitted(root: Path) -> Tuple[str, List[str], str]:
     files = []  # type: List[str]
 
     # Tracked changes
-    code, diff = _run_git(root, ["diff", "-U10", "HEAD"])
+    code, diff = _run_git(root, ["diff", "--relative", "-U10", "HEAD"])
     if diff.strip():
         changed = _extract_files_from_diff(diff)
         files.extend(changed)
@@ -190,7 +190,7 @@ def _collect_uncommitted(root: Path) -> Tuple[str, List[str], str]:
 def _collect_staged(root: Path) -> Tuple[str, List[str], str]:
     if not _is_git_repo(root):
         raise ValueError("Not a git repository.")
-    code, diff = _run_git(root, ["diff", "-U10", "--cached"])
+    code, diff = _run_git(root, ["diff", "--relative", "-U10", "--cached"])
     if not diff.strip():
         raise ValueError("No staged changes to review.")
     files = _extract_files_from_diff(diff)
@@ -199,7 +199,7 @@ def _collect_staged(root: Path) -> Tuple[str, List[str], str]:
 
 
 def _collect_branch(root: Path, branch: str) -> Tuple[str, List[str], str]:
-    code, diff = _run_git(root, ["diff", "-U10", f"{branch}...HEAD"])
+    code, diff = _run_git(root, ["diff", "--relative", "-U10", f"{branch}...HEAD"])
     if not diff.strip():
         raise ValueError(f"No changes between {branch} and HEAD.")
     files = _extract_files_from_diff(diff)
@@ -238,7 +238,7 @@ def _parse_range(root: Path, target: str) -> Optional[Tuple[str, str, str]]:
 
 def _collect_range(root: Path, a: str, b: str, sep: str) -> Tuple[str, List[str], str]:
     """Diff between two commits. ".." = a vs b; "..." = merge-base(a, b) vs b."""
-    code, diff = _run_git(root, ["diff", "-U10", f"{a}{sep}{b}"], timeout=60)
+    code, diff = _run_git(root, ["diff", "--relative", "-U10", f"{a}{sep}{b}"], timeout=60)
     if code != 0:
         raise ValueError(f"git diff {a}{sep}{b} failed.")
     if not diff.strip():
@@ -288,7 +288,7 @@ def _collect_commits(root: Path) -> Tuple[str, List[str], str]:
     parts = []  # type: List[str]
     all_files = []  # type: List[str]
     for sha, subject in commits:
-        _, diff = _run_git(root, ["diff", "-U10", f"{sha}~1..{sha}"], timeout=60)
+        _, diff = _run_git(root, ["diff", "--relative", "-U10", f"{sha}~1..{sha}"], timeout=60)
         if not diff.strip():
             continue
         files = _extract_files_from_diff(diff)

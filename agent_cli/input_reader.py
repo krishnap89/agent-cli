@@ -17,6 +17,7 @@ import sys
 from typing import TYPE_CHECKING, Optional
 
 from rich.console import Console
+from rich.text import Text
 
 if TYPE_CHECKING:
     from prompt_toolkit.completion import Completer
@@ -44,7 +45,7 @@ except (ImportError, OSError, ValueError):  # e.g. Windows consoles
 _pt_available = False
 try:
     from prompt_toolkit import PromptSession
-    from prompt_toolkit.formatted_text import HTML
+    from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.history import InMemoryHistory
     _pt_available = True
 except ImportError:
@@ -74,16 +75,21 @@ def _strip_rich_markup(prompt: str) -> str:
     return tag_re.sub("", prompt)
 
 
-def _rich_to_pt_html(prompt: str) -> HTML:
-    """Best-effort convert Rich markup to prompt_toolkit HTML for the prompt."""
-    import re
-    result = prompt
-    result = re.sub(r"\[bold (\w+)\]", r'<b><style fg="\1">', result)
-    result = re.sub(r"\[/bold \w+\]", "</style></b>", result)
-    result = re.sub(r"\[dim\]", '<style fg="gray">', result)
-    result = re.sub(r"\[/dim\]", "</style>", result)
-    result = re.sub(r"\[/?[^\]]*\]", "", result)
-    return HTML(result)
+def _rich_to_pt(prompt: str) -> FormattedText:
+    """Convert a Rich markup prompt for prompt_toolkit. Not through its HTML, which
+    is XML and fails on a folder name with & or <."""
+    parts = []
+    for segment in Text.from_markup(prompt, emoji=False).render(console):
+        style = segment.style
+        names = []
+        if style and style.dim:
+            names.append("fg:gray")
+        elif style and style.color:
+            names.append(f"fg:{style.color.name}")
+        if style and style.bold:
+            names.append("bold")
+        parts.append((" ".join(names), segment.text))
+    return FormattedText(parts)
 
 
 # ---- fallback (non-prompt_toolkit) path ----------------------------------------
@@ -172,7 +178,7 @@ def _read_message(prompt: str, erase: bool = False) -> str:
         return _read_with_prompt_toolkit(prompt, erase)
 
     if not _CAN_DETECT_PASTE:
-        first = console.input(prompt)
+        first = console.input(prompt, emoji=False)
         return _read_block() if first.strip() == BLOCK_MARK else first
 
     with _BracketedPaste():
@@ -182,7 +188,7 @@ def _read_message(prompt: str, erase: bool = False) -> str:
 def _read_with_prompt_toolkit(prompt: str, erase: bool = False) -> str:
     global _last_erased
     session = _get_session()
-    pt_prompt = _rich_to_pt_html(prompt)
+    pt_prompt = _rich_to_pt(prompt)
     # A completer can opt into showing the menu as you type (the agent REPL's
     # command completer does); otherwise the menu waits for Tab (coder REPL).
     while_typing = getattr(_completer, "complete_while_typing", False)
@@ -197,7 +203,7 @@ def _read_with_prompt_toolkit(prompt: str, erase: bool = False) -> str:
 
 
 def _read_with_paste_detection(prompt: str) -> str:
-    first = console.input(prompt)
+    first = console.input(prompt, emoji=False)
 
     if first.strip() == BLOCK_MARK:
         return _read_block()
