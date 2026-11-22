@@ -6,6 +6,7 @@ from rich.console import Console
 from rich.prompt import Confirm
 
 from . import redact
+from .checks import relative_paths
 from .config import Config
 from .repomap import RepoMap
 
@@ -456,7 +457,7 @@ class Tools:
             return "Search timed out. Narrow it with path (e.g. a module folder)."
         if r.returncode > 1:  # 1 = no matches; 2 (grep) / 128 (git grep) = error
             hint = " Set regex=false to search for plain text." if regex else ""
-            return f"Search error: {r.stderr.strip()[:300]}.{hint}"
+            return f"Search error: {relative_paths(r.stderr.strip(), self.root)[:300]}.{hint}"
 
         hits = []
         red = redact.get(self.root)
@@ -549,6 +550,7 @@ class Tools:
         except subprocess.TimeoutExpired:
             return "Command timed out after 120s."
         out = f"exit code: {r.returncode}\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+        out = relative_paths(out, self.root)
         redact.note_untrusted(out, "log")
         return out
 

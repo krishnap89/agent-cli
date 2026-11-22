@@ -116,7 +116,7 @@ class Config:
 # and the model emits calls as text. Qwen models are trained on this
 # <tool_call> format, so they follow it reliably.
 SYSTEM_PROMPT = """You are a coding agent running in the user's terminal.
-Working directory: {workdir}
+Your working directory is the project root. Use paths relative to it.
 
 # Tools
 You can call these tools:
@@ -155,7 +155,7 @@ Rules:
 # model names a tool and its arguments on an ACTION line; the agent parses the
 # line and runs the tool, so no JSON or special-token markup is needed.
 ACTION_SYSTEM_PROMPT = """You are a coding agent running in the user's terminal.
-Working directory: {workdir}
+Your working directory is the project root. Use paths relative to it.
 
 # Tools
 You can use these tools:

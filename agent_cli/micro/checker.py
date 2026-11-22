@@ -14,7 +14,7 @@ from ..android import (
     compile_tasks, run_gradle, parse_kotlin_errors, format_kotlin_errors,
     is_offline_dependency_error, run_ktlint,
 )
-from ..checks import truncate_output
+from ..checks import relative_paths, truncate_output
 from ..config import Config
 
 
@@ -83,7 +83,7 @@ class Checker:
             return None  # errors are all in files we didn't change
         if errors:
             return format_kotlin_errors(errors, self.root)
-        return "\n".join(output.splitlines()[-60:])
+        return relative_paths("\n".join(output.splitlines()[-60:]), self.root)
 
 
 def _signature(kind: str, text: str) -> str:

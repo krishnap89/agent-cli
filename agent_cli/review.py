@@ -320,7 +320,7 @@ def _collect_files(root: Path, file_list: List[str]) -> Tuple[str, List[str], st
         try:
             content = path.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
-            parts.append(f"{rel}: (could not read: {e})")
+            parts.append(f"{rel}: (could not read: {e.strerror})")
             continue
         parts.append(f"{rel}\n{_numbered(content)}")
     desc = f"{len(file_list)} file{'s' if len(file_list) != 1 else ''}"

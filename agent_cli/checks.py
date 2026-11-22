@@ -4,11 +4,20 @@ Used by coder after applying edits to catch errors before the user sees broken c
 """
 import json
 import os
+import re
 import shlex
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+
+
+def relative_paths(text: str, root: Path) -> str:
+    """Shorten full paths in text meant for the model: project -> ., home -> ~."""
+    for base, short in ((root.resolve(), "."), (Path.home(), "~")):
+        if len(base.parts) > 2:  # a root like /app would also match inside src/app
+            text = re.sub(rf"(?:file://)?{re.escape(str(base))}(?![\w-])", short, text)
+    return text
 
 
 def builtin_lint(root: Path, files: List[str]) -> List[str]:
@@ -87,7 +96,7 @@ def custom_lint(root: Path, files: List[str], cmd: str, timeout: int = 60) -> Op
     except subprocess.TimeoutExpired:
         return f"Lint command timed out after {timeout}s: {full_cmd}"
     if r.returncode != 0:
-        return (r.stdout + r.stderr).strip()
+        return relative_paths((r.stdout + r.stderr).strip(), root)
     return None
 
 
@@ -100,7 +109,7 @@ def run_tests(root: Path, cmd: str, timeout: int = 600) -> Tuple[bool, str]:
         )
     except subprocess.TimeoutExpired:
         return False, f"Test command timed out after {timeout}s: {cmd}"
-    output = (r.stdout + r.stderr).strip()
+    output = relative_paths((r.stdout + r.stderr).strip(), root)
     return r.returncode == 0, output
 
 

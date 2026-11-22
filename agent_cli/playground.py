@@ -36,7 +36,7 @@ class ClientGone(Exception):
 
 def defaults(cfg: Config) -> dict:
     template = ACTION_SYSTEM_PROMPT if cfg.tool_format == "action" else SYSTEM_PROMPT
-    agent = template.format(workdir=cfg.workdir, tool_docs=render_tool_docs(cfg), repo_map_section="")
+    agent = template.format(tool_docs=render_tool_docs(cfg), repo_map_section="")
     return {
         "base_url": redact.mask_for_log(cfg.workdir, cfg.base_url),
         "model": cfg.model,

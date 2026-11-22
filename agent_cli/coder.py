@@ -26,7 +26,7 @@ from .android import (
     format_kotlin_errors, format_detected_modules, is_offline_dependency_error,
     is_build_config_file, map_file_to_module, module_display_name, run_ktlint,
 )
-from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
+from .checks import builtin_lint, custom_lint, ext_lint_cmd, relative_paths, run_tests, truncate_output
 from .config import Config, UNLIMITED_CHARS
 from .notes import find_notes, gather_init_info, load_notes, notes_exist, INIT_PROMPT
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display, Skill
@@ -243,7 +243,7 @@ class Coder:
     def _rel(self, path: str) -> str:
         p = (self.root / path).resolve()
         if not p.is_relative_to(self.root):
-            raise ValueError(f"{path} is outside {self.root}")
+            raise ValueError(f"{path} is outside the project")
         return p.relative_to(self.root).as_posix()
 
     def all_files(self) -> List[str]:
@@ -323,7 +323,7 @@ class Coder:
         try:
             text = (self.root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError as e:
-            return f"{rel}\n(could not read: {e})\n"
+            return f"{rel}\n(could not read: {e.strerror})\n"
         fence = "```"
         while fence in text:
             fence += "`"
@@ -757,7 +757,7 @@ class Coder:
     def _fix_with_model(self, error_text: str, what: str,
                         changed: Dict[str, Optional[str]], user_text: str) -> bool:
         """Send check errors to model for fixing. Returns True if model replied with edits."""
-        truncated = truncate_output(error_text, self.cfg.check_output_chars)
+        truncated = truncate_output(relative_paths(error_text, self.root), self.cfg.check_output_chars)
         redact.note_untrusted(truncated, "log")
         feedback = (f"Your edits were applied, but {what} failed:\n\n{truncated}\n\n"
                     "Fix the problem with SEARCH/REPLACE blocks. The files in the chat "
@@ -1231,7 +1231,7 @@ class Coder:
             failures = [r for r in test_results if not r["passed"]]
             if failures:
                 failure_text = "\n".join(
-                    f"FAILED: {f['name']}\n{f['failure_message']}\n{f['failure_trace'][:500]}"
+                    f"FAILED: {f['name']}\n{f['failure_message']}\n{relative_paths(f['failure_trace'], self.root)[:500]}"
                     for f in failures
                 )
                 feedback = (
@@ -1592,7 +1592,7 @@ class Coder:
         try:
             r = subprocess.run(command, shell=True, cwd=self.root, capture_output=True,
                                text=True, timeout=600)
-            output = (r.stdout + r.stderr).strip()
+            output = relative_paths((r.stdout + r.stderr).strip(), self.root)
             status = f"exit code {r.returncode}"
             failed = r.returncode != 0
         except subprocess.TimeoutExpired:
