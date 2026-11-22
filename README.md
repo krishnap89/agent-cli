@@ -67,6 +67,12 @@ Keep AGENT_KEEP_SPECIAL_TOKENS=1 (the default).
 4. Malformed JSON is reported back to the model so it can retry.
 5. A reply with no tool call ends the turn. <think> blocks are stripped.
 
+A call runs only if it can be read whole. Text inside a call's values (file
+content, commands) is never run as a call. The `<function=...>` form needs every
+closing tag and can't carry call tags inside a value; such content, and anything
+containing `<tool_response>` (the stop string), must be sent as JSON with `<`
+written as `\u003c`, which the error tells the model.
+
 ## Action format
 For models that return nothing for the markup above, set AGENT_TOOL_FORMAT=action.
 The model then writes `ACTION name key=value` lines and gets results back in an

@@ -8,7 +8,7 @@ from rich.markdown import Markdown
 from .checks import relative_paths
 from .config import (ACTION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, REPO_MAP_SECTION,
                      Config, SYSTEM_PROMPT)
-from .llm import ACTION_BLOCK, CUT_OFF_REASONS, LLMError, chat
+from .llm import ACTION_BLOCK, CUT_OFF_REASONS, XML_CALL, XML_LITERAL, LLMError, chat
 from .notes import load_notes
 from .term import safe_markup, safe_text
 from .tools import TOOL_SCHEMAS, JIRA_TOOL_SCHEMAS, Tools
@@ -16,7 +16,10 @@ from .jira import is_configured as is_jira_configured
 
 console = Console(emoji=False)  # :codes: in model text are not emoji
 
-TOOL_CALL_RE = re.compile(r"<tool_call>\s*(.*?)\s*(?:</tool_call>|$)", re.DOTALL)
+_CALL_RE = re.compile(XML_CALL)
+# What to hide from the user: whole calls, and a broken one to the end of the reply
+_CALL_MARKUP_RE = re.compile(rf"{XML_CALL}|<tool_call>.*\Z", re.DOTALL)
+_CALL_OR_THINK_RE = re.compile(rf"({XML_LITERAL})|<think>.*?(?:</think>|\Z)", re.DOTALL)
 # Also strips an unclosed <think> (model ran out of tokens while thinking)
 THINK_RE = re.compile(r"<think>(.*?)(?:</think>|$)", re.DOTALL)
 # Either an action block (kept) or thinking (dropped), whichever starts first
@@ -74,13 +77,21 @@ def show(text: str) -> None:
 
 # Newer Qwen models (Qwen3-Coder, Qwen3.5+) are trained on an XML tool-call format:
 #   <tool_call><function=search><parameter=pattern>Auth</parameter></function></tool_call>
-XML_FUNC_RE = re.compile(r"<function=([\w.-]+)>(.*?)(?:</function>|$)", re.DOTALL)
-XML_PARAM_RE = re.compile(r"<parameter=([\w.-]+)>\n?(.*?)\n?(?:</parameter>|(?=<parameter=)|$)", re.DOTALL)
+XML_FUNC_RE = re.compile(r"<function=([\w.-]+)>(.*)</function>", re.DOTALL)
+XML_PARAM_RE = re.compile(r"<parameter=([\w.-]+)>(.*?)</parameter>", re.DOTALL)
+# Arguments where every space and newline counts
+_VERBATIM_ARGS = {"content", "old_str", "new_str", "command"}
 
 
-def _xml_value(value: str):
-    """Parameters arrive as text; turn numbers/booleans/JSON back into values."""
+def _xml_value(name: str, key: str, value: str):
+    """Parameters arrive as text. String arguments stay text; for the others turn
+    numbers/booleans/JSON back into values."""
+    if key in _VERBATIM_ARGS:
+        # only the newline the format puts after and before the tags
+        return value.removeprefix("\n").removesuffix("\n")
     v = value.strip()
+    if _PARAMS.get(name, {}).get(key) == "string":
+        return v
     try:
         return json.loads(v)
     except json.JSONDecodeError:
@@ -88,9 +99,8 @@ def _xml_value(value: str):
 
 
 def strip_thinking(text: str, tool_format: str) -> str:
-    if tool_format == "action":
-        return _BLOCK_OR_THINK_RE.sub(lambda m: m.group(1) or "", text).strip()
-    return THINK_RE.sub("", text).strip()
+    keep = _BLOCK_OR_THINK_RE if tool_format == "action" else _CALL_OR_THINK_RE
+    return keep.sub(lambda m: m.group(1) or "", text).strip()
 
 
 def response_tag(cfg: Config) -> str:
@@ -142,55 +152,118 @@ def _match_brace(s: str, start: int) -> int:
     return -1
 
 
-def _bare_json_calls(text: str) -> list[str]:
+def _bare_json_calls(text: str) -> list[tuple[int, int]]:
     """Find bare JSON tool calls a model emitted without the <tool_call> wrapper.
 
     Models often wrap the call in prose ("I'll map the repo." before, "STOP"
     after) and emit a bare `{"name": ...}` object on its own line. We take
     balanced-brace objects that begin a line and carry a "name" key, so a JSON
-    example quoted mid-sentence (not at a line start) is left alone.
+    example quoted mid-sentence (not at a line start) is left alone. Returns
+    their (start, end) spans; what is inside one is never a call of its own.
     """
-    out = []  # type: list[str]
+    out, done = [], 0
     for m in re.finditer(r"(?m)^\s*(?:```(?:json)?\s*)?\{", text):
         start = text.index("{", m.start())
+        if start < done:
+            continue
         end = _match_brace(text, start)
         if end == -1:
+            if re.match(r'\{\s*"(?:name|arguments)"', text[start:]):
+                break  # a call cut short: the lines below are its content
             continue
-        obj = text[start:end + 1]
-        if '"name"' in obj:
-            out.append(obj)
+        if '"name"' in text[start:end + 1]:
+            out.append((start, end + 1))
+            done = end + 1
     return out
+
+
+_ESCAPE_HINT = ("If a value contains tags such as tool_call, parameter or tool_response, "
+                "send the call as JSON and write each < in it as \\u003c.")
+
+
+def _function_call(body: str) -> dict:
+    """Read a <function=...> call that XML_CALL matched."""
+    func = XML_FUNC_RE.search(body)
+    name, args = func.group(1), {}
+    for key, value in XML_PARAM_RE.findall(func.group(2)):
+        if key in args:
+            raise ValueError(f"{name} has parameter {key} twice")
+        args[key] = _xml_value(name, key, value)
+    return {"name": name, "arguments": args}
+
+
+def _json_call(body: str) -> dict:
+    obj = json.loads(body.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip())
+    name = obj["name"]
+    args = obj.get("arguments", {})
+    if isinstance(args, str):  # some models double-encode
+        args = json.loads(args)
+    return {"name": name, "arguments": args}
 
 
 def parse_tool_calls(text: str, cut_off: bool = False) -> tuple[list[dict], list[str]]:
     """Extract tool calls from model text. Returns (calls, parse_errors).
 
-    cut_off: the reply ended early. Half-received JSON never parses, but the
-    <function=...> form does, so that one must be closed to run."""
+    A call's values can be file content that looks like calls, so each call is
+    read whole. At the first one that can't be, reading stops. A <function=...>
+    call has no quoting, so any doubt about the reply also cancels those before
+    it: their end may have been file content. JSON calls before them still run.
+
+    cut_off: the reply ended early."""
     calls, errors = [], []
-    blocks = TOOL_CALL_RE.findall(text)
-    if not blocks:
-        blocks = _bare_json_calls(text)
-    for raw in blocks:
-        raw = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-        func = XML_FUNC_RE.search(raw)
-        if func and not raw.startswith("{"):
-            if cut_off and not func.group().endswith("</function>"):
-                errors.append(f"{func.group(1)} was not run: the reply was cut off inside the "
-                              "tool call. Send it again, shorter.")
-                continue
-            args = {k: _xml_value(v) for k, v in XML_PARAM_RE.findall(func.group(2))}
-            calls.append({"name": func.group(1), "arguments": args})
-            continue
+    first = text.find("<tool_call>")
+    # Bare JSON only matters without tags, or when it starts before the first one.
+    bare = _bare_json_calls(text) if first == -1 or "{" in text[:first] else []
+    if first == -1 or any(start < first < end for start, end in bare):
+        if re.search(r"(?m)^\s*<function=[\w.-]+>\s*<parameter=", text):
+            return [], ["Nothing was run: a <function=...> call must be inside <tool_call> tags."]
+        for start, end in bare:
+            try:
+                calls.append(_json_call(text[start:end]))
+            except (ValueError, KeyError, TypeError, RecursionError) as e:
+                errors.append(f"Could not parse tool call ({e}): {text[start:start + 200]}")
+        return calls, errors
+
+    problem = ""
+    unquoted_from = None  # index in calls of the first <function=...> call
+    pos = 0
+    while not problem:
+        start = text.find("<tool_call>", pos)
+        between = text[pos:] if start == -1 else text[pos:start]
+        if re.search(r"</(?:tool_call|function|parameter)>", between):
+            problem = "found a closing tag outside a tool call"
+            break
+        if start == -1:
+            if cut_off and unquoted_from is not None and between.strip():
+                problem = "the reply was cut off after a function call"
+            break
+        match = _CALL_RE.match(text, start)
+        pos = match.end() if match else len(text)
+        body = text[start + len("<tool_call>"):pos]
+        if match:
+            body = body[:-len("</tool_call>")]
         try:
-            obj = json.loads(raw)
-            name = obj["name"]
-            args = obj.get("arguments", {})
-            if isinstance(args, str):  # some models double-encode
-                args = json.loads(args)
-            calls.append({"name": name, "arguments": args})
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
-            errors.append(f"Could not parse tool call ({e}): {raw[:200]}")
+            if body.lstrip().startswith("<function="):
+                if unquoted_from is None:
+                    unquoted_from = len(calls)
+                if not match:
+                    raise ValueError("the function call is not closed, or a value in it has "
+                                     "call tags. If the reply was cut off, send it again, shorter")
+                calls.append(_function_call(body))
+            else:
+                # Not closed is fine for JSON at the end: half of it never parses.
+                calls.append(_json_call(body))
+        except (ValueError, KeyError, TypeError, RecursionError) as e:
+            problem = f"{e}: {body.strip()[:200]}"
+        if not match:
+            break
+    if problem:
+        if "</think>" in text:
+            calls.clear()  # thinking may have leaked: any of them may be a draft
+        elif unquoted_from is not None:
+            del calls[unquoted_from:]
+        which = "Nothing from that call on" if calls else "No call in the reply"
+        errors.append(f"Could not parse tool call ({problem}). {which} was run. {_ESCAPE_HINT}")
     return calls, errors
 
 
@@ -600,7 +673,8 @@ class Agent:
                     # stop the model from inventing tool results
                     stop = None if self.chat_only else [f"<{response_tag(self.cfg)}>"]
                     reply = chat(self.cfg, self.messages, stop=stop,
-                                 on_progress=progress, on_retry=retry)
+                                 on_progress=progress, on_retry=retry,
+                                 tool_format="" if self.chat_only else self.cfg.tool_format)
             except LLMError as e:
                 console.print(f"[red]{safe_markup(str(e))}[/red]")
                 self.messages.pop() if self.messages[-1]["role"] == "user" else None
@@ -620,7 +694,7 @@ class Agent:
                 visible = strip_action_blocks(text)
             else:
                 calls, errors = parse_tool_calls(text, cut_off)
-                visible = TOOL_CALL_RE.sub("", text).strip()
+                visible = _CALL_MARKUP_RE.sub("", text).strip()
                 if reply.tool_calls:
                     # The server's own tool parser took the call out of the text.
                     # Use it, and write it back as text so the history stays in

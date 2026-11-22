@@ -102,7 +102,7 @@ def build_request(base: Config, data: dict) -> tuple:
 
 def inspect_reply(cfg: Config, content: str, reasoning: str, finish: str, native: list) -> dict:
     """What the agent would make of this reply, plus anything that looks wrong."""
-    text = strip_thinking(clean_content(content), cfg.tool_format)
+    text = strip_thinking(clean_content(content, cfg.tool_format), cfg.tool_format)
     if cfg.tool_format == "action":
         calls, errors = parse_action_calls(text, finish in CUT_OFF_REASONS)
     else:

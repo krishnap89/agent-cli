@@ -63,7 +63,6 @@ class _Retryable(Exception):
     pass
 
 
-# Control tokens that can appear once special tokens are kept.
 # A complete action-format write_file, edit_file or run_command block. Its body is
 # literal, so the reply clean-up (control tokens, thinking tags) must not touch it.
 ACTION_BLOCK = (r"(?ms:(?:^|(?<=</think>))[ \t]*ACTION[ \t]+(?:"
@@ -74,16 +73,34 @@ ACTION_BLOCK = (r"(?ms:(?:^|(?<=</think>))[ \t]*ACTION[ \t]+(?:"
                 r"[ \t]*<<<NEW[ \t\r]*\n.*?^NEW[ \t\r]*$"
                 r"|run_command\b[^\n]*\n(?:[ \t\r]*\n)*"
                 r"[ \t]*<<<COMMAND[ \t\r]*\n.*?^COMMAND>>>[ \t\r]*$))")
+# A whole <tool_call> in xml format, literal in the same way. A tag inside a JSON
+# string is text. A <function=...> call has no quoting, so every tag must be
+# closed and a value can't hold call markup: else file text could end the call.
+XML_CALL = (r"(?s:<tool_call>\s*(?:"
+            r"(?:```(?:json)?\s*)?\{[^\"<]*"
+            r"(?:(?:\"[^\"\\]*(?:\\.[^\"\\]*)*\"|<(?!/?tool_call>))[^\"<]*)*"
+            r"|<function=[\w.-]+>"
+            r"(?:\s*<parameter=[\w.-]+>[^<]*"
+            r"(?:<(?!/?tool_call>|/?function[=>]|/?parameter[=>])[^<]*)*</parameter>)*"
+            r"\s*</function>\s*"
+            r")</tool_call>)")
+# A broken call is literal to the end of the reply: cleaning text out of it could
+# turn a call that must be refused into one that runs with part of its content.
+XML_LITERAL = XML_CALL + r"|(?s:<tool_call>\s*(?:\{|```|<function=).*\Z)"
+# By tool format, which only the agent passes. coder, web and the other callers
+# don't parse tool calls, so call markup must not stop their thinking being stripped.
+_LITERAL = {"action": ACTION_BLOCK, "xml": XML_LITERAL, "": ACTION_BLOCK}
 # finish_reason values of a reply that ended early. "incomplete" is ours: the
 # stream closed with neither a finish_reason nor [DONE].
 CUT_OFF_REASONS = ("length", "max_tokens", "incomplete")
+# Control tokens that can appear once special tokens are kept.
 _CONTROL_TOKENS_RE = re.compile(r"<\|(?:im_end|im_start|endoftext|end_of_text|eot_id)\|>")
 
 
 class Reply:
     def __init__(self, content: str, finish_reason: str, reasoning: str,
-                 tool_calls: Optional[list] = None):
-        self.content = clean_content(content)
+                 tool_calls: Optional[list] = None, tool_format: str = ""):
+        self.content = clean_content(content, tool_format)
         self.finish_reason = finish_reason  # "stop", "length", "tool_calls", ...
         self.reasoning = reasoning          # thinking text, if the server splits it out
         # Native tool calls, if the server's tool parser extracted them:
@@ -125,11 +142,12 @@ def build_payload(cfg: Config, messages: list, stop: Optional[List[str]] = None,
     return payload
 
 
-def clean_content(content: str) -> str:
+def clean_content(content: str, tool_format: str = "") -> str:
     """Strip control tokens and leaked <think> text from a completed reply."""
-    content = re.sub(f"({ACTION_BLOCK})|{_CONTROL_TOKENS_RE.pattern}",
+    literal = _LITERAL.get(tool_format, XML_LITERAL)  # any other format is parsed as xml
+    content = re.sub(f"({literal})|{_CONTROL_TOKENS_RE.pattern}",
                      lambda m: m.group(1) or "", content or "")
-    tags = [m for m in re.finditer(f"({ACTION_BLOCK})|</?think>", content) if not m.group(1)]
+    tags = [m for m in re.finditer(f"({literal})|</?think>", content) if not m.group(1)]
     if tags and all(m.group() == "</think>" for m in tags):
         content = content[tags[0].end():]  # thinking leaked into content
     return content
@@ -142,13 +160,16 @@ def chat(
     on_progress: ProgressFn = None,
     on_retry: Optional[Callable[[str, int, float], None]] = None,
     temperature: Optional[float] = None,
+    tool_format: str = "",
 ) -> Reply:
-    """POST to {base_url}/chat/completions and return the reply, retrying on gateway errors."""
+    """POST to {base_url}/chat/completions and return the reply, retrying on gateway errors.
+
+    tool_format: pass it only if the reply will be parsed for tool calls."""
     messages, counts = _masked(cfg, messages)
     attempts = cfg.retries + 1
     for attempt in range(1, attempts + 1):
         try:
-            reply = _chat_once(cfg, messages, stop, on_progress, temperature)
+            reply = _chat_once(cfg, messages, stop, on_progress, temperature, tool_format)
             redact.report_counts(counts)
             return reply
         except _Retryable as e:
@@ -173,7 +194,7 @@ def _masked(cfg: Config, messages: list):
 
 
 def _chat_once(cfg: Config, messages: list, stop, on_progress: ProgressFn,
-               temperature: Optional[float] = None) -> Reply:
+               temperature: Optional[float] = None, tool_format: str = "") -> Reply:
     url = cfg.base_url.rstrip("/") + "/chat/completions"
     payload = build_payload(cfg, messages, stop=stop, temperature=temperature)
 
@@ -187,9 +208,9 @@ def _chat_once(cfg: Config, messages: list, stop, on_progress: ProgressFn,
         with urllib.request.urlopen(req, timeout=cfg.timeout) as resp:
             ctype = resp.headers.get("Content-Type", "")
             if cfg.stream and "text/event-stream" in ctype:
-                return _read_stream(cfg, resp, on_progress)
+                return _read_stream(cfg, resp, on_progress, tool_format)
             # Server ignored stream=true (or streaming is off): plain JSON.
-            return _parse_full(cfg, json.loads(resp.read().decode()))
+            return _parse_full(cfg, json.loads(resp.read().decode()), tool_format)
     except urllib.error.HTTPError as e:
         body = e.read().decode(errors="replace")[:300].strip()
         msg = f"HTTP {e.code} from {url}: {body}"
@@ -274,7 +295,7 @@ def iter_stream_events(cfg: Config, resp):
     yield from flush()
 
 
-def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
+def _read_stream(cfg: Config, resp, on_progress: ProgressFn, tool_format: str = "") -> Reply:
     """Accumulate the shared stream events into a finished Reply."""
     content, reasoning, finish = [], [], ""
     n_content = n_reasoning = 0
@@ -314,10 +335,10 @@ def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
     if not finish and not done:
         finish = "incomplete"
     calls = [tools[i] for i in sorted(tools)]
-    return Reply("".join(content), finish, "".join(reasoning), calls)
+    return Reply("".join(content), finish, "".join(reasoning), calls, tool_format)
 
 
-def _parse_full(cfg: Config, data: dict) -> Reply:
+def _parse_full(cfg: Config, data: dict, tool_format: str = "") -> Reply:
     log_http(cfg, "REPLY", json.dumps(data, indent=2))
     if cfg.debug:
         print("\n----- RAW RESPONSE -----\n" + json.dumps(data, indent=2)[:4000] + "\n------------------------\n")
@@ -333,6 +354,7 @@ def _parse_full(cfg: Config, data: dict) -> Reply:
                          "arguments": red.unmask_arguments(
                              (tc.get("function") or {}).get("arguments", ""))}
                         for tc in msg.get("tool_calls") or []],
+            tool_format=tool_format,
         )
     except (KeyError, IndexError, TypeError) as e:
         raise LLMError(f"Unexpected response shape: {json.dumps(data)[:500]}") from e
