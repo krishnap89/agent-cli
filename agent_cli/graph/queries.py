@@ -282,15 +282,18 @@ def _explain_one(g: CodeGraph, nid: str, out: _Out) -> None:
     section("used as a type by", g.in_edges(nid, (USES_TYPE,)), True, limit=6)
 
 
-def _is_test(path: str) -> bool:
+def is_test(path: str) -> bool:
+    """True for test sources (test dirs, *Test.kt, *Tests.swift, *.test.ts, __tests__/)."""
     return bool(_TEST_RE.search(path))
 
 
-def impact(g: CodeGraph, files: Iterable[str], depth: int = 3,
-           budget: int = DEFAULT_BUDGET) -> str:
-    """What may break if these files change: reverse traversal from every
-    declaration in them along call/inherit/inject/type/override/reference/
-    import/module edges, grouped by file with the nearest reason."""
+_is_test = is_test
+
+
+def impact_files(g: CodeGraph, files: Iterable[str], depth: int = 3):
+    """Reverse traversal behind `impact`. Returns (by_file, modules, why,
+    norm, missing): by_file maps each affected file (outside the changed ones)
+    to (distance, nearest node), why maps a node to the edge that reached it."""
     seeds = []  # type: List[str]
     missing = []  # type: List[str]
     norm = []  # type: List[str]
@@ -313,11 +316,8 @@ def impact(g: CodeGraph, files: Iterable[str], depth: int = 3,
         for nid, node in g.nodes.items():  # build file changed -> its module
             if node.kind == "module" and node.file == f:
                 seeds.append(nid)
-    out = _Out(budget)
-    if missing:
-        out.add("not in graph: " + ", ".join(missing))
     if not seeds:
-        return out.text() or "Nothing to analyse."
+        return {}, [], {}, norm, missing
     dist = {s: 0 for s in seeds}  # type: Dict[str, int]
     why = {}  # type: Dict[str, Edge]
     q = deque(seeds)
@@ -355,6 +355,20 @@ def impact(g: CodeGraph, files: Iterable[str], depth: int = 3,
             continue
         if f not in by_file or d < by_file[f][0]:
             by_file[f] = (d, nid)
+    return by_file, modules, why, norm, missing
+
+
+def impact(g: CodeGraph, files: Iterable[str], depth: int = 3,
+           budget: int = DEFAULT_BUDGET) -> str:
+    """What may break if these files change: reverse traversal from every
+    declaration in them along call/inherit/inject/type/override/reference/
+    import/module edges, grouped by file with the nearest reason."""
+    by_file, modules, why, norm, missing = impact_files(g, files, depth)
+    out = _Out(budget)
+    if missing:
+        out.add("not in graph: " + ", ".join(missing))
+    if not norm:
+        return out.text() or "Nothing to analyse."
     out.add(f"impact of {', '.join(norm)}: {len(by_file)} files"
             + (f", {len(modules)} modules" if modules else "") + f" (depth {depth})")
     tests = [f for f in by_file if _is_test(f)]

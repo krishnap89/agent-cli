@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 import typer
 from rich.console import Console
+from rich.markup import escape
 from rich.prompt import Confirm
 from rich.syntax import Syntax
 
@@ -32,6 +33,7 @@ from .skills import load_skills, select_skills, format_skill_context, list_skill
 from .review import (
     collect_material, split_material_by_file, split_material_by_commit,
     build_review_messages, build_merge_messages, needs_split, REVIEW_SYSTEM,
+    branching_without_tests, branching_note, material_branch_note,
 )
 from .editblock import EditBlock, EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
 from .input_reader import read_message, set_completer
@@ -39,6 +41,8 @@ from .intent import route as route_intent
 from .llm import LLMError, chat, list_models, switch_model
 from . import redact
 from .repomap import RepoMap
+from .risk import CheckFacts, callers_not_updated, model_risk_line, risk_note, strip_risk_line
+from .style import with_style
 from .testgen import (
     resolve_target, detect_test_setup, classify_class, check_required_libs,
     has_suspend_funs, has_flow_or_viewmodelscope, has_constructor_deps,
@@ -181,6 +185,7 @@ HELP = """Commands:
   /compile [all]       run Gradle compile check on modules of files in chat
   /modules             list detected modules and file-to-module mapping
   /review [target]     review changes (uncommitted, staged, commits, branch, A..B range, files)
+  /debt                list `shortcut: <limit>, <when to upgrade>` comments by file
   /test-gen <class>    generate unit tests for a Kotlin class
   /doc <target>        add KDoc/Javadoc to Kotlin or Java declarations (class, file, folder)
   /skills              list available skills
@@ -224,6 +229,7 @@ class Coder:
         self.history: List[dict] = []
         self.undo_stack: List[Dict[str, Optional[str]]] = []
         self.last_diffs: List[str] = []
+        self.last_checks = CheckFacts()
         self.repo_map = RepoMap(self.root) if cfg.use_map else None
         self._all_files: Optional[List[str]] = None
         self.android_info = detect_android(self.root, cfg.android)
@@ -384,7 +390,7 @@ class Coder:
         return msgs
 
     def build_messages(self, query: str) -> List[dict]:
-        system = CODE_SYSTEM if self.mode == "code" else ASK_SYSTEM
+        system = with_style(CODE_SYSTEM, self.cfg.style) if self.mode == "code" else ASK_SYSTEM
         context = self._context_messages(query)
         fixed = len(system) + sum(len(m["content"]) for m in context)
         # Drop the oldest history until everything fits the budget.
@@ -455,6 +461,7 @@ class Coder:
             self.mode = old_mode
 
     def _send(self, user_text: str, resend: bool) -> None:
+        self._model_risks: List[str] = []
         self.history.append({"role": "user", "content": user_text})
         changed: Dict[str, Optional[str]] = {}
         for attempt in range(self.cfg.max_reflections + 1):
@@ -467,7 +474,9 @@ class Coder:
                 self.history.pop()
                 return
             self.history.append({"role": "assistant", "content": text})
-            self._display(text)
+            if self.mode == "code":
+                self._model_risks.append(model_risk_line(text))
+            self._display(strip_risk_line(text) if self.mode == "code" else text)
             if self.mode != "code":
                 break
             blocks, problems = parse_edit_blocks(text, default_path=self._single_file())
@@ -489,6 +498,7 @@ class Coder:
         if changed:
             self._run_checks_loop(changed, user_text)
             self.undo_stack.append(changed)
+            self._print_risk(changed)
             self.last_diffs = []
             for rel, old in changed.items():
                 new = (self.root / rel).read_text(encoding="utf-8", errors="replace") if (self.root / rel).exists() else ""
@@ -500,6 +510,16 @@ class Coder:
 
         if not resend:
             self._offer_mentioned_files(text or "", user_text, applied=bool(changed))
+
+    def _print_risk(self, changed: Dict[str, Optional[str]]) -> None:
+        """One-line risk note from check facts, graph callers and the model's
+        latest Risk line. Advisory: a failure here must never lose the edit."""
+        try:
+            model_line = next((r for r in reversed(self._model_risks) if r), "")
+            note = risk_note(self.last_checks, callers_not_updated(self.root, changed), model_line)
+        except Exception as e:
+            note = f"Risk: (note unavailable: {e})"
+        console.print(f"[dim]{escape(note)}[/dim]", highlight=False)
 
     def _single_file(self) -> Optional[str]:
         return next(iter(self.editable)) if len(self.editable) == 1 else None
@@ -595,12 +615,14 @@ class Coder:
 
     def _run_checks_loop(self, changed: Dict[str, Optional[str]], user_text: str) -> None:
         """After edits are applied, run lint and optionally tests, feeding errors back."""
+        self.last_checks = CheckFacts()
         if self.mode != "code" or not self.cfg.lint_enabled:
             console.print(f"[green]Applied edits to {', '.join(changed)}[/green] [dim](/undo to revert)[/dim]")
             return
 
         changed_files = list(changed.keys())
         for fix_attempt in range(self.cfg.max_fix_attempts + 1):
+            self.last_checks = CheckFacts()
             # --- lint (built-in + custom + per-ext) ---
             lint_errors = self.run_lint(changed_files)
 
@@ -609,6 +631,7 @@ class Coder:
                 ktlint_errs = run_ktlint(self.root, changed_files, self.cfg.ktlint_mode)
                 if ktlint_errs:
                     lint_errors.extend(ktlint_errs)
+            self.last_checks.lint = not lint_errors
 
             if lint_errors:
                 err_text = "\n".join(lint_errors)
@@ -650,6 +673,7 @@ class Coder:
                 return
 
             passed, output = run_tests(self.root, self.cfg.test_cmd, self.cfg.test_timeout)
+            self.last_checks.tests = passed
             if passed:
                 console.print(f"[dim]Tests: {self.cfg.test_cmd} ... passed[/dim]")
                 console.print(f"[green]Applied edits to {', '.join(changed)}[/green] [dim](/undo to revert)[/dim]")
@@ -693,6 +717,7 @@ class Coder:
             self.root, tasks, self.cfg.gradle_args, self.cfg.compile_timeout,
         )
 
+        self.last_checks.compile = passed
         if passed:
             console.print("[dim]Compile: passed[/dim]")
             return None
@@ -703,6 +728,7 @@ class Coder:
                 "Run one online build in Android Studio or remove --offline from "
                 "AGENT_GRADLE_ARGS.[/yellow]"
             )
+            self.last_checks.compile = None  # not verified
             return None
 
         errors, all_pre_existing = parse_kotlin_errors(
@@ -714,6 +740,7 @@ class Coder:
             console.print(
                 f"[yellow]Compile errors in files you didn't change: {files_str}[/yellow]"
             )
+            self.last_checks.compile = None  # not verified
             return None
 
         if errors:
@@ -740,7 +767,8 @@ class Coder:
         if text is None:
             return False
         self.history.append({"role": "assistant", "content": text})
-        self._display(text)
+        getattr(self, "_model_risks", []).append(model_risk_line(text))
+        self._display(strip_risk_line(text))
         blocks, problems = parse_edit_blocks(text, default_path=self._single_file())
         if blocks or problems:
             errors = self._apply(blocks, changed) + problems
@@ -822,6 +850,7 @@ class Coder:
 
         self.history.append({"role": "user", "content": f"Review of {desc}"})
         self.history.append({"role": "assistant", "content": review_text})
+        self._offer_test_gen(branching_without_tests(material))
 
         not_in_chat = [f for f in files
                        if f not in self.editable and f not in self.read_only]
@@ -829,6 +858,20 @@ class Coder:
             console.print(f"\n[cyan]Reviewed files not in chat: {', '.join(not_in_chat[:10])}[/cyan]")
             if Confirm.ask("Add them so you can ask for fixes?", default=True):
                 self.add(not_in_chat[:10])
+
+    def _offer_test_gen(self, flags: List[Tuple[str, int]]) -> None:
+        """Flag new branching logic that came without a test change; offer /test-gen."""
+        if not flags:
+            return
+        console.print(f"\n[yellow]{branching_note(flags)}[/yellow]")
+        classes = [Path(f).stem for f, _ in flags if f.endswith(".kt")]
+        if not classes or self.android_info is None:
+            console.print("[dim]Consider adding tests for the new branches.[/dim]")
+            return
+        if self.cfg.auto_approve:
+            console.print(f"[dim]Generate tests with: /test-gen {classes[0]}[/dim]")
+        elif Confirm.ask(f"Generate tests now with /test-gen {classes[0]}?", default=False):
+            self.test_gen(classes[0])
 
     def _review_single(self, material: str, desc: str) -> Optional[str]:
         """Send one review request."""
@@ -842,9 +885,10 @@ class Coder:
             return self._review_single(material, desc)
 
         findings = []  # type: List[str]
+        branch_note = material_branch_note(material)  # whole diff: tests may be in another chunk
         for i, (fname, chunk) in enumerate(chunks):
             console.print(f"[dim]  [{i + 1}/{len(chunks)}] {fname}[/dim]")
-            messages = build_review_messages(chunk, fname)
+            messages = build_review_messages(chunk, fname, branch_note)
             text = self._call_model(messages)
             if text is None:
                 return None
@@ -864,9 +908,10 @@ class Coder:
             return self._review_single(material, desc)
 
         findings = []  # type: List[str]
+        branch_note = material_branch_note(material)  # whole diff: tests may be in another chunk
         for i, (header, chunk) in enumerate(chunks):
             console.print(f"[dim]  [{i + 1}/{len(chunks)}] {header}[/dim]")
-            messages = build_review_messages(chunk, f"commit {header}")
+            messages = build_review_messages(chunk, f"commit {header}", branch_note)
             text = self._call_model(messages)
             if text is None:
                 return None
@@ -1790,6 +1835,9 @@ def main(
                         console.print("[yellow]Usage: /doc <class|file|folder> [--update][/yellow]")
             elif cmd == "/review":
                 coder.review(arg)
+            elif cmd == "/debt":
+                from .debt import find_shortcuts, format_debt
+                console.print(format_debt(find_shortcuts(coder.root)), markup=False, highlight=False)
             elif cmd == "/skills":
                 console.print(list_skills_display(coder.skills))
             elif cmd == "/skill":

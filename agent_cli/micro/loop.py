@@ -22,9 +22,11 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
 from rich.console import Console
+from rich.markup import escape
 
 from .. import redact
 from ..editblock import unified_diff
+from ..risk import CheckFacts, callers_not_updated, is_graph_file, risk_note
 from .checker import Checker, CheckResult
 from .modelpick import model_for
 from .roles import (
@@ -111,10 +113,14 @@ class MicroOrchestrator:
         # New files this run created as empty placeholders, so we can remove any
         # the Editor never actually filled.
         self._created: List[str] = []
+        # Last check result of each step and the Editor's own Risk lines, for
+        # the risk note printed at the end of the run.
+        self._step_checks: List[CheckResult] = []
+        self._model_risks: List[str] = []
 
         self.locator = Locator(self._run_role("Locator"))
         self.planner = Planner(self._run_role("Planner"))
-        self.editor = Editor(self._run_role("Editor"))
+        self.editor = Editor(self._run_role("Editor"), style=self.cfg.style)
         self.fixer = Fixer(self._run_role("Fixer"))
         self.reviewer = Reviewer(self._run_role("Reviewer"))
         self.summarizer = Summarizer(self._run_role("Summarizer"))
@@ -326,16 +332,20 @@ class MicroOrchestrator:
     # ---- one step: Editor -> Checker -> (Fixer -> Checker)* -> Reviewer ----
 
     def _run_step(self, step: PlanStep, changed: Dict[str, Optional[str]]) -> bool:
+        self._step_checks.append(CheckResult(ok=True))  # nothing ran yet
         self._banner("Editor")
         new_files = [f for f in step.files if self._is_new_file(f)]
         try:
             (blocks, problems), _ = self.editor.run(
                 step=step, file_blocks=self._file_blocks(step.files),
                 new_files=new_files, symbols=self._symbol_context(step),
+                graph_facts=self._graph_facts(step),
             )
         except RoleError as e:
             console.print(f"[red]Stopped: {e}[/red]")
             return False
+        if self.editor.last_risk:
+            self._model_risks.append(self.editor.last_risk)
         allowed = self._normalize(step.files)
         apply_errors = self._apply_scoped(blocks, changed, allowed) + problems
         step_files = self._touched(step, changed)
@@ -392,6 +402,7 @@ class MicroOrchestrator:
             else:
                 self._banner("Checker", round_no=round_no)
                 result = self.checker.check(step_files)
+                self._step_checks[-1] = result  # keep each step's latest result
             if result.ok:
                 console.print("[dim]Checks passed.[/dim]")
                 return True
@@ -462,11 +473,40 @@ class MicroOrchestrator:
         except RoleError:
             summary = f"Changed {len(changed)} file(s): {', '.join(changed)}."
         console.print(f"\n[green]{summary}[/green]")
+        model_line = "; ".join(dict.fromkeys(self._model_risks))
+        try:
+            note = risk_note(self._check_facts(), callers_not_updated(self.root, changed), model_line)
+        except Exception as e:  # advisory; the run's edits are already saved
+            note = f"Risk: (note unavailable: {e})"
+        console.print(f"[dim]{escape(note)}[/dim]", highlight=False)
         console.print(f"[dim]Changed {', '.join(changed)} — /undo to revert the whole run.[/dim]")
         self.coder.history.append({"role": "user", "content": f"/micro {request}"})
         self.coder.history.append({"role": "assistant", "content": summary})
 
     # ---- helpers ----
+
+    def _check_facts(self) -> CheckFacts:
+        """Fold the checks that ran into one: a fact fails if any step's last run failed."""
+        def fold(values):
+            ran = [v for v in values if v is not None]
+            return all(ran) if ran else None
+        res = self._step_checks
+        return CheckFacts(lint=fold(r.lint for r in res), compile=fold(r.compiled for r in res))
+
+    def _graph_facts(self, step: PlanStep) -> str:
+        """Callers, affected tests and reuse candidates from the code graph
+        (Kotlin, Swift, TS/JS). '' when off (AGENT_GRAPH_FACTS=0) or unknown."""
+        if (os.environ.get("AGENT_GRAPH_FACTS", "1") in ("0", "false")
+                or not any(is_graph_file(f) for f in step.files)):
+            return ""
+        try:
+            from ..graph import load_graph
+            from ..graph.facts import edit_facts
+            graph, _ = load_graph(self.root)
+            return edit_facts(graph, list(step.files), step.summary)
+        except Exception as e:  # the facts are advisory; never break a run
+            console.print(f"[dim]Graph facts unavailable: {e}[/dim]")
+            return ""
 
     def _touched(self, step: PlanStep, changed: Dict[str, Optional[str]]) -> List[str]:
         """Files this step is working on: its declared files plus any actually changed."""

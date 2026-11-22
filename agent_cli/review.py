@@ -6,6 +6,7 @@ Used by both coder.py and main.py (agent).
 """
 import fnmatch
 import glob
+import re
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -23,6 +24,8 @@ Checklist — check each, but report only real problems you are confident about:
 - Resource leaks and performance problems
 - Readability and naming
 - Missing or outdated tests
+- Unnecessary code: anything that could be deleted, or that re-implements an
+  existing helper
 
 Rules:
 - Do NOT invent problems. If nothing is wrong, say "No issues found."
@@ -397,14 +400,74 @@ def split_material_by_commit(material: str) -> List[Tuple[str, str]]:
     return chunks
 
 
+# Added lines that open a new branch: if/elif/else if, when/switch/case/match,
+# guard, catch/except, and ternaries.
+_BRANCH_RE = re.compile(
+    r"^\s*(?:\}\s*)?(?:if\b|elif\b|else\s+if\b|switch\b|guard\b|catch\b|except\b"
+    # soft keywords: not when used as a name (`match = ...`, `when.x`, `case = 1`)
+    r"|(?:when|match)\b(?!\s*(?:=(?!=)|[.,)\]]|\+=))|case\b(?!\s*(?:=(?!=)|\+=)))"
+    r"|\s\?\s[^?:\n]+\s:\s")
+_SOURCE_EXTS = (".py", ".kt", ".kts", ".java", ".swift", ".ts", ".tsx", ".js", ".jsx", ".mjs",
+                ".cjs", ".go", ".rs", ".rb", ".php", ".cs", ".c", ".cpp", ".h", ".dart", ".scala")
+_NUMBERED_RE = re.compile(r"^\s*\d+ ?")
+
+
+def _is_test_path(path: str) -> bool:
+    from .graph.queries import is_test
+    name = path.rsplit("/", 1)[-1]
+    return is_test(path) or name.startswith("test_") or name.endswith("_test.py")
+
+
+def _added_lines(chunk: str) -> List[str]:
+    lines = chunk.splitlines()
+    if lines and lines[0].startswith("new file: "):  # untracked file, numbered
+        return [_NUMBERED_RE.sub("", ln, count=1) for ln in lines[1:]]
+    return [ln[1:] for ln in lines if ln.startswith("+") and not ln.startswith("+++")]
+
+
+def branching_without_tests(material: str) -> List[Tuple[str, int]]:
+    """[(file, new branches)] for source files that gain branching logic when
+    no test file changes at all. [] for whole-file reviews (no diff)."""
+    chunks = split_material_by_file(material)
+    if not chunks or any(_is_test_path(f) for f, _ in chunks):
+        return []
+    out = []
+    for f, chunk in chunks:
+        if not f.endswith(_SOURCE_EXTS):
+            continue
+        n = sum(1 for ln in _added_lines(chunk)
+                if _BRANCH_RE.search(ln) and not ln.lstrip().startswith(("#", "//", "*", "/*")))
+        if n:
+            out.append((f, n))
+    return out
+
+
+def branching_note(flags: List[Tuple[str, int]]) -> str:
+    """Fact line for the reviewer prompt and the terminal; '' when nothing flagged."""
+    if not flags:
+        return ""
+    parts = ", ".join(f"{f} (+{n} branch{'es' if n != 1 else ''})" for f, n in flags)
+    return f"New branching logic without a test change: {parts}."
+
+
+def material_branch_note(material: str) -> str:
+    """branching_note for the whole review material ('' when nothing flagged)."""
+    return branching_note(branching_without_tests(material))
+
+
 def build_review_messages(
     material: str,
     desc: str,
+    branch_note: Optional[str] = None,
 ) -> List[dict]:
-    """Build messages for a single review request."""
+    """Build messages for a single review request. Split reviews pass
+    `branch_note` computed on the WHOLE material, since a test change may sit
+    in another chunk; None computes it from `material`."""
+    note = material_branch_note(material) if branch_note is None else branch_note
+    facts = f"\n\nFact (from the diff): {note} Report it as a finding." if note else ""
     return [
         {"role": "system", "content": REVIEW_SYSTEM},
-        {"role": "user", "content": f"Review these changes ({desc}):\n\n{material}"},
+        {"role": "user", "content": f"Review these changes ({desc}):{facts}\n\n{material}"},
     ]
 
 

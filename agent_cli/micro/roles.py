@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 from ..editblock import EditBlock, parse_edit_blocks
+from ..risk import model_risk_line
+from ..style import style_rules, with_style
 
 # A model-caller: takes a messages list, returns the reply text, or None if the
 # request itself failed (network/empty). The orchestrator passes Coder._call_model
@@ -199,12 +201,18 @@ class Editor(Role):
     name = "Editor"
     system = "You are a careful software engineer applying one small, specific change.\n\n" + _EDIT_FORMAT
 
-    def __init__(self, call: CallFn):
+    def __init__(self, call: CallFn, style: Optional[str] = None):
         super().__init__(call)
         self._default_path: Optional[str] = None
+        self.last_risk = ""
+        if style_rules(style):
+            base = self.system.replace("Output the blocks and nothing else.",
+                                       "Output the blocks, then the Risk line, and nothing else.")
+            self.system = with_style(base, style)
 
     def build(self, *, step: PlanStep, file_blocks: str,
-              new_files: Optional[List[str]] = None, symbols: str = "") -> str:
+              new_files: Optional[List[str]] = None, symbols: str = "",
+              graph_facts: str = "") -> str:
         self._default_path = step.files[0] if len(step.files) == 1 else None
         new_note = ""
         if new_files:
@@ -212,12 +220,15 @@ class Editor(Role):
             new_note = (f"\nThese files do not exist yet and must be CREATED with an empty "
                         f"SEARCH section: {listing}\n")
         sym_note = f"\n{symbols}\n" if symbols else ""
-        return (f"Step to implement: {step.summary}\n{new_note}{sym_note}\n"
+        facts_note = f"\n{graph_facts}\n" if graph_facts else ""
+        return (f"Step to implement: {step.summary}\n{new_note}{sym_note}{facts_note}\n"
                 f"Current contents of the files you may edit:\n\n{file_blocks}\n\n"
                 "Write the SEARCH/REPLACE blocks for this step:")
 
     def parse(self, text: str):
-        return _parse_edits(text, self._default_path)
+        result = _parse_edits(text, self._default_path)
+        self.last_risk = model_risk_line(text)
+        return result
 
 
 class Fixer(Role):

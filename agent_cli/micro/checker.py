@@ -26,6 +26,9 @@ class CheckResult:
     signature: str = ""
     # Full human/model-readable error text. Empty when ok.
     detail: str = ""
+    # What actually ran, for the risk note: None = did not run.
+    lint: Optional[bool] = None
+    compiled: Optional[bool] = None
 
 
 class Checker:
@@ -49,14 +52,16 @@ class Checker:
         if lint_errors:
             text = "\n".join(lint_errors)
             return CheckResult(ok=False, signature=_signature("lint", text),
-                               detail=truncate_output(text, self.cfg.check_output_chars))
+                               detail=truncate_output(text, self.cfg.check_output_chars), lint=False)
 
+        self._compiled = None
         compile_detail = self._compile(files)
         if compile_detail is not None:
             return CheckResult(ok=False, signature=_signature("compile", compile_detail),
-                               detail=truncate_output(compile_detail, self.cfg.check_output_chars))
+                               detail=truncate_output(compile_detail, self.cfg.check_output_chars),
+                               lint=True, compiled=False)
 
-        return CheckResult(ok=True)
+        return CheckResult(ok=True, lint=True, compiled=self._compiled)
 
     def _compile(self, files: List[str]) -> Optional[str]:
         """Run the Gradle compile check. Returns error text, or None if it passed/skipped."""
@@ -68,6 +73,7 @@ class Checker:
             return None
         passed, output = run_gradle(self.root, tasks, self.cfg.gradle_args, self.cfg.compile_timeout)
         if passed:
+            self._compiled = True
             return None
         if is_offline_dependency_error(output):
             # Not the edit's fault; don't loop on it.

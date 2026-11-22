@@ -50,6 +50,8 @@ class Config:
     use_map: bool = os.getenv("AGENT_MAP", "1") not in ("0", "false")
     map_chars: int = int(os.getenv("AGENT_MAP_CHARS", "4000"))  # repo map size in the prompt
     context_chars: int = parse_context_chars(os.getenv("AGENT_CONTEXT_CHARS", ""))  # default no limit; set chars to cap
+    # Edit-style rules for coder and the micro Editor: full (default) | lite | off.
+    style: str = os.getenv("AGENT_STYLE", "full")
     max_reflections: int = int(os.getenv("AGENT_MAX_REFLECTIONS", "2"))  # coder: retries for failed edits
     max_fix_attempts: int = int(os.getenv("AGENT_MAX_FIX_ATTEMPTS", "2"))
     max_turns: int = int(os.getenv("AGENT_MAX_TURNS", "30"))

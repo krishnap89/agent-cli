@@ -11,7 +11,7 @@ from .mentions import expand as expand_mentions
 from .llm import list_models, switch_model
 from . import redact
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
-from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
+from .review import collect_material, material_branch_note, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
 from .turns import prompt_header
 from .writing import handle as handle_writing
@@ -27,6 +27,9 @@ def app() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "graph":
         from .graph.cli import run as run_graph
         sys.exit(run_graph(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "debt":
+        from .debt import main as debt_main
+        sys.exit(debt_main(sys.argv[2:]))
     if len(sys.argv) > 1 and sys.argv[1] == "scan":
         from .redact import scan_main
         sys.exit(scan_main(sys.argv[2:]))
@@ -182,6 +185,10 @@ def main(
             target = text[7:].strip()
             _do_review(cfg, target)
             continue
+        if text == "/debt":
+            from .debt import find_shortcuts, format_debt
+            console.print(format_debt(find_shortcuts(cfg.workdir)), markup=False, highlight=False)
+            continue
         if text == "/skills":
             console.print(list_skills_display(skills))
             continue
@@ -268,7 +275,7 @@ def main(
             # silently sending it to the model as a chat message.
             unknown = text.split(None, 1)[0]
             console.print(f"[yellow]Unknown command: {unknown}[/yellow]")
-            console.print("[dim]Commands: /chat /agent /micro /analyze /review /test-gen /doc /map /notes "
+            console.print("[dim]Commands: /chat /agent /micro /analyze /review /debt /test-gen /doc /map /notes "
                           "/skills /skill /model /clear /exit · writing: /grammar /rephrase "
                           "/tone /email /slack"
                           "\nTo send a message starting with '/', rephrase it.[/dim]")
@@ -309,9 +316,10 @@ def _do_review(cfg: Config, target: str) -> None:
     if is_commits and split:
         commit_chunks = split_material_by_commit(material)
         findings = []  # type: List[str]
+        branch_note = material_branch_note(material)  # whole diff: tests may be in another chunk
         for i, (header, chunk) in enumerate(commit_chunks):
             console.print(f"[dim]  [{i + 1}/{len(commit_chunks)}] {header}[/dim]")
-            msgs = build_review_messages(chunk, f"commit {header}")
+            msgs = build_review_messages(chunk, f"commit {header}", branch_note)
             text = _call(msgs)
             if text is None:
                 return
@@ -325,9 +333,10 @@ def _do_review(cfg: Config, target: str) -> None:
     elif split:
         chunks = split_material_by_file(material)
         findings = []
+        branch_note = material_branch_note(material)  # whole diff: tests may be in another chunk
         for i, (fname, chunk) in enumerate(chunks):
             console.print(f"[dim]  [{i + 1}/{len(chunks)}] {fname}[/dim]")
-            msgs = build_review_messages(chunk, fname)
+            msgs = build_review_messages(chunk, fname, branch_note)
             text = _call(msgs)
             if text is None:
                 return
@@ -344,6 +353,11 @@ def _do_review(cfg: Config, target: str) -> None:
 
     if review_text:
         show(review_text)
+    from .review import branching_note, branching_without_tests
+    note = branching_note(branching_without_tests(material))
+    if note:
+        console.print(f"\n[yellow]{note}[/yellow] [dim]Add tests, e.g. with /test-gen <Class> "
+                      "in coder (Kotlin).[/dim]")
 
 
 def _do_init_notes(cfg: Config) -> None:

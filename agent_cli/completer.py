@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 ALL_COMMANDS = [
     "/add", "/ask", "/autotest", "/check", "/clear", "/code", "/compile",
-    "/diff", "/doc", "/drop", "/exit", "/help", "/lint", "/ls", "/map",
+    "/debt", "/diff", "/doc", "/drop", "/exit", "/help", "/lint", "/ls", "/map",
     "/mode", "/model", "/modules", "/notes", "/quit", "/read", "/reset", "/review",
     "/run", "/skill", "/skills", "/test", "/test-gen", "/tokens", "/undo",
 ]
@@ -135,6 +135,7 @@ AGENT_COMMANDS = [
     ("/chat", "chat only, no tools"),
     ("/agent", "use tools"),
     ("/review", "code review [target]"),
+    ("/debt", "list shortcut: comments by file"),
     ("/map", "repo map [query]"),
     ("/notes", "show project notes"),
     ("/skills", "list skills"),

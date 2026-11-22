@@ -31,7 +31,7 @@ from .llm import (
 from .repomap import RepoMap
 from .review import (
     collect_material, needs_split, split_material_by_file,
-    build_review_messages, build_merge_messages,
+    build_review_messages, build_merge_messages, material_branch_note,
 )
 
 app = typer.Typer(add_completion=False)
@@ -438,11 +438,12 @@ class WebCoder:
             if not chunks:
                 chunks = [("all", material)]
             findings = []
+            branch_note = material_branch_note(material)  # whole diff: tests may be in another chunk
             for i, (fname, chunk) in enumerate(chunks):
                 if self._cancel.is_set():
                     break
                 on_chunk(json.dumps({"type": "info", "text": f"[{i + 1}/{len(chunks)}] {fname}"}) + "\n")
-                messages = build_review_messages(chunk, fname)
+                messages = build_review_messages(chunk, fname, branch_note)
                 text = self._call_model_blocking(messages)
                 if text:
                     findings.append(f"## {fname}\n{text}")

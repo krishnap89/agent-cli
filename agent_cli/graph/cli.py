@@ -8,6 +8,8 @@ TypeScript/JavaScript code graph.
   agent graph explain <symbol>           everything the graph knows about it
   agent graph impact <file>...           what may break if these files change
   agent graph query "<text>"             ranked symbol search
+  agent graph audit [--no-explain]       dead code, near-duplicates, untested risky
+                                         files, ranked; the model explains the top 5
 
 Symbols are full ids (com.x.UserRepository.load, App.Repo.load(id:),
 src/api/user.UserApi.load), suffixes (UserRepository.load, Repo.load(id:)) or
@@ -51,6 +53,11 @@ def _parser() -> argparse.ArgumentParser:
     s = sub.add_parser("query", parents=[common], help="search symbols")
     s.add_argument("text", nargs="+")
     s.add_argument("--limit", type=int, default=15)
+    s = sub.add_parser("audit", parents=[common],
+                       help="dead code, near-duplicates and untested risky files, ranked")
+    s.add_argument("--limit", type=int, default=20, help="findings to list (default 20)")
+    s.add_argument("--no-explain", dest="explain", action="store_false",
+                   help="don't ask the model to explain the top 5")
     return p
 
 
@@ -93,9 +100,27 @@ def run(argv: List[str], out=None) -> int:
                     pass
             files.append(f)
         text = queries.impact(graph, files, args.depth, budget)
+    elif args.cmd == "audit":
+        return _audit(graph, root, args, budget, out)
     else:
         text = queries.query(graph, " ".join(args.text), budget, args.limit)
     print(text, file=out)
+    return 0
+
+
+def _audit(graph, root: Path, args, budget: int, out) -> int:
+    from . import audit
+    tested, n_tests = audit._tested_files(graph)
+    findings = audit.audit(graph, root, tested)
+    n_code = audit.code_file_count(graph)
+    print(audit.render(findings, budget, args.limit, n_tests, n_code), file=out)
+    if args.explain and findings and n_code:
+        from ..llm import LLMError
+        print("\nModel's take on the top 5:", file=out)
+        try:
+            print(audit.explain(findings[:5], graph, root), file=out)
+        except LLMError as e:
+            print(f"(model unavailable: {str(e).splitlines()[0]}; use --no-explain)", file=out)
     return 0
 
 

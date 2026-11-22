@@ -25,6 +25,7 @@ Multi-line: pasted text is kept together (press Enter on an empty line to send),
 or type """ on its own line to start and end a multi-line message.
 
 Env: AGENT_BASE_URL, AGENT_MODEL, AGENT_API_KEY, AGENT_MAX_TOKENS,
+AGENT_STYLE (full|lite|off, default full: see "Change style"),
 AGENT_TEMPERATURE, AGENT_TIMEOUT, AGENT_MAX_TURNS,
 AGENT_DEBUG=1 (print raw server responses),
 AGENT_HTTP_LOG=<path> (append every HTTP request and reply to that file, bearer
@@ -89,11 +90,57 @@ repo map and settings:
 - /undo, /diff, /run <cmd> (optionally share output), /tokens, /map, /clear, /reset.
 - /lint runs syntax checks; /test runs AGENT_TEST_CMD; /autotest on|off toggles auto-test after edits.
 - /review [target] reviews code changes (see below).
+- /debt lists deliberate shortcuts (see "Change style" below).
 - /notes shows the project notes file.
 - AGENT_CONTEXT_CHARS (default: no limit): set a char budget to cap context —
   then the oldest history is dropped to stay under it, you're warned if the
   files alone are too big, and /review splits per file past 50% of the budget.
   Left unset or set to 0/inf/infinite/none/unlimited, nothing is trimmed.
+
+## Change style: smallest complete change
+coder and the `/micro` Editor add a short set of rules to their system prompt,
+adapted from the MIT-licensed [ponytail](https://github.com/DietrichGebert/ponytail)
+skill by Dietrich Gebert: make the smallest change that fully solves the request,
+reuse existing helpers, no speculative options or reformatting, prefer deleting,
+add a test with new branching logic, mark shortcuts, and end with a `Risk:` line.
+
+    AGENT_STYLE=full   # default: all rules (8 lines)
+    AGENT_STYLE=lite   # 3 lines: smallest change, don't touch unrelated code, Risk line
+    AGENT_STYLE=off    # no rules (the baseline for measuring diff size)
+
+**Risk note.** Every coder or `/micro` reply that edits files ends with one line
+built from facts, plus the model's own `Risk:` line (which is removed from the
+reply above so it isn't shown twice):
+
+    Risk: lint ok, compile ok · tests not run · 1 caller not updated: MainActivity.onCreate (app/src/main/java/com/example/app/MainActivity.kt:23) · model: callers must pass force
+
+"not compiled" means only lint ran (no Gradle compile check for these files).
+"callers not updated" lists calls, from files the edit didn't touch, into
+functions whose declaration line changed, plus calls to a function the edit
+removed or renamed (found by name, so only names no other function in the project
+has). Kotlin, Swift and TS/JS only: the code graph's languages, and the graph is
+not loaded when no changed file is one of them. The model's line is the latest
+`Risk:` line from the reply or its lint/test fix rounds; `Risk:` lines inside code
+blocks are ignored. Replies that edit nothing (a question back to you) get no note.
+
+**Shortcuts.** When the model knowingly takes a shortcut it is asked to leave a
+comment `shortcut: <limit>, <when to upgrade>` (`;` also separates the parts).
+`/debt` (coder and agent, or `agent debt [dir]`) lists them by file, scanning the
+repo map's source files; a marker inside a string literal or docstring is ignored.
+For example:
+
+    2 shortcuts in 1 file:
+    core/data/src/main/java/com/example/data/UserRepository.kt
+         25  in-memory only  ->  upgrade: when the app runs more than one process
+         31  no eviction  ->  upgrade: (no upgrade trigger given)
+
+**Measuring diff size.** `python -m agent_cli.evaldiff` runs each task in
+`evals/diffsize/tasks.json` (8 small edits on the Kotlin, TS/JS and Swift test
+fixtures, each in a temp copy) once per style against your model server and prints
+changed lines (+/-) per task, with the total change against the first style:
+
+    python -m agent_cli.evaldiff                         # off (before) vs full (after), coder
+    python -m agent_cli.evaldiff --styles off,lite,full --micro --repeat 3
 
 ## Automatic checks after edits
 After applying edits, coder runs built-in lint (Python syntax, JSON validity,
@@ -139,6 +186,11 @@ the run stops with a clear message.
   rounds. The step stops early if the *same* check error comes back twice.
   Edits are scoped to the step's files: a block aimed at any other path (an
   invented path, or the format example) is rejected and sent back, never written.
+- Before writing, the Editor also gets **code graph facts** (Kotlin, Swift,
+  TS/JS): callers outside the step's files of the functions it is changing (those
+  named in the step, else all in the files), the tests `agent graph impact` says
+  are affected, and up to 5 existing helpers elsewhere whose names resemble the
+  step ("reuse candidates"). `AGENT_GRAPH_FACTS=0` turns this off.
 - **Reviewer** judges each step's diff against its intent. A CHANGES verdict
   feeds its note back to the Fixer (so "compiles but doesn't match the step" is
   caught too), up to `AGENT_REVIEW_ROUNDS` extra passes; the edits are kept
@@ -398,12 +450,20 @@ Review code changes with a structured checklist. Works in both coder and agent.
     agent --review main
 
 Reviews check for: correctness, edge cases, error handling, security, resource
-leaks, performance, readability, and test coverage. Output is a numbered list
+leaks, performance, readability, test coverage, and unnecessary code (anything
+that could be deleted or re-implements an existing helper). Output is a numbered list
 of findings with severity, location, problem, and fix suggestion. Large diffs
 are split per file and findings merged automatically.
 
 After a review, coder offers to add the reviewed files so you can follow up
 with "fix 1 and 3" in code mode.
+
+If the diff adds branching logic (`if`/`elif`/`else if`, `when`/`switch`/`case`/
+`match`, `guard`, `catch`/`except`, ` ? : `) to source files and changes no test
+file, the reviewer is told so (it reports it as a finding) and the terminal shows
+`New branching logic without a test change: Foo.kt (+3 branches).` On an Android
+project with a Kotlin file flagged, coder offers to run `/test-gen <Class>`
+(with `-y` it only prints the command).
 
 ## Test generation (`/test-gen`)
 Generate JVM unit tests for a Kotlin class that compile, run, and follow your
@@ -565,6 +625,18 @@ inferred `overrides`, with or without the `override` keyword. `node_modules`,
     agent graph query "user cache"
     agent graph callers "UserListViewModel.select(_:)"   # Swift: labels pick an overload
     agent graph impact packages/core/src/cache.ts        # TS: through barrels into other workspace packages
+    agent graph audit [--limit 20] [--no-explain]       # dead code, near-duplicates, untested risky files
+
+`audit` ranks three kinds of finding on one score, roughly "lines at stake":
+`dead` functions with no callers, references or overrides (framework entry
+points such as `override`/`open` members, `onCreate`, `viewDidLoad`, `@Test`,
+`@IBAction`, `@Preview` and interface requirements are skipped; score = lines);
+`dup` pairs of function bodies at least 85% alike by tokens (score = smaller body's
+lines x similarity x 1.5); and `untested` code files no test reaches through the
+graph, weighted by how many other files depend on them and how much they branch
+(score = 3 x dependents + branches / 2 + lines / 100). Only the top 5 go to the
+model, with their code, to judge whether each is real and name the smallest fix;
+`--no-explain` skips the model.
 
 Symbols can be full ids, `Class.member` or bare names. Output is plain text with
 `path:line` and is capped by `--budget` (default 4000 chars, `AGENT_GRAPH_CHARS`).
@@ -580,3 +652,9 @@ for ~700 files). Storage sits behind `graph.store.FactStore`, so it can be swapp
 for SQLite. On Kotlin, Swift and TypeScript/JavaScript repos the repo map is ranked with PageRank over the graph's
 call/inherit/inject edges (files without such edges keep the identifier-based
 ranking); `AGENT_GRAPH_RANK=0` turns that off.
+
+## Credits
+The change-style rules, risk note, `shortcut:` markers, the "what could be deleted"
+review item and `agent graph audit` adapt ideas from
+[ponytail](https://github.com/DietrichGebert/ponytail) by Dietrich Gebert (MIT
+license). The rules text here is a rewrite, not a copy.
