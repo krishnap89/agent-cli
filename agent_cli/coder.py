@@ -19,7 +19,6 @@ from typing import Dict, List, Optional, Tuple
 import typer
 from rich.console import Console
 from rich.markup import escape
-from rich.prompt import Confirm
 from rich.syntax import Syntax
 
 from .agent import THINK_RE, show
@@ -40,7 +39,7 @@ from .review import (
 )
 from .folders import Folders
 from .editblock import EditBlock, EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
-from .input_reader import read_message, set_completer
+from .input_reader import Confirm, read_message, set_completer
 from .intent import route as route_intent
 from .llm import LLMError, chat, list_models, switch_model
 from . import redact
@@ -503,7 +502,6 @@ class Coder:
 
         if changed:
             self._run_checks_loop(changed, user_text)
-            self.undo_stack.append(changed)
             self._print_risk(changed)
             self.last_diffs = []
             for rel, old in changed.items():
@@ -530,7 +528,18 @@ class Coder:
     def _single_file(self) -> Optional[str]:
         return next(iter(self.editable)) if len(self.editable) == 1 else None
 
-    def _apply(self, blocks, changed: Dict[str, Optional[str]]) -> List[str]:
+    def _save_undo(self, step: Dict[str, Optional[str]], rel: str, old: Optional[str]) -> None:
+        """Call before each write, so an edit can be undone however its command ends.
+        A step keeps the first version of each file and is on the stack only once."""
+        step.setdefault(rel, old)
+        if not self.undo_stack or self.undo_stack[-1] is not step:
+            self.undo_stack.append(step)
+
+    def _apply(self, blocks, changed: Dict[str, Optional[str]],
+               undo_step: Optional[Dict[str, Optional[str]]] = None) -> List[str]:
+        """Apply blocks, noting old contents in `changed`. `undo_step` is for a
+        command whose undo step spans several `changed` dicts (/doc)."""
+        step = changed if undo_step is None else undo_step
         errors = []
         for b in blocks:
             try:
@@ -562,6 +571,7 @@ class Coder:
                               f"<<<<<<< SEARCH\n{b.search}=======\n{b.replace}>>>>>>> REPLACE")
                 continue
             changed.setdefault(rel, old)
+            self._save_undo(step, rel, old)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(new, encoding="utf-8")
             if rel not in self.editable:
@@ -1284,8 +1294,6 @@ class Coder:
                     1 for r in test_results if not r["passed"]
                 )
 
-        # Save undo state
-        self.undo_stack.append(changed)
         self.last_diffs = []
         for c_rel, old in changed.items():
             new = (self.root / c_rel).read_text(encoding="utf-8", errors="replace") if (self.root / c_rel).exists() else ""
@@ -1412,8 +1420,6 @@ class Coder:
 
                 # Save original for guardrail
                 current_source = path.read_text(encoding="utf-8", errors="replace")
-                if rel not in all_changed:
-                    all_changed[rel] = source  # original before any changes
 
                 messages = build_doc_messages(
                     rel, current_source, batch, style,
@@ -1436,6 +1442,7 @@ class Coder:
                     whole = extract_code_block(text)
                     if whole is not None and whole.strip():
                         batch_changed[rel] = current_source
+                        self._save_undo(all_changed, rel, current_source)
                         path.write_text(whole if whole.endswith("\n") else whole + "\n",
                                         encoding="utf-8")
                     else:
@@ -1445,7 +1452,7 @@ class Coder:
                         continue
                 else:
                     # Apply blocks
-                    errors = self._apply(blocks, batch_changed)
+                    errors = self._apply(blocks, batch_changed, all_changed)
                     if errors:
                         for fix_round in range(self.cfg.doc_max_fix):
                             feedback = "\n\n".join(errors)
@@ -1461,7 +1468,7 @@ class Coder:
                             blocks, _ = parse_edit_blocks(text, default_path=rel)
                             if not blocks:
                                 break
-                            errors = self._apply(blocks, batch_changed)
+                            errors = self._apply(blocks, batch_changed, all_changed)
                             if not errors:
                                 break
                         if errors:
@@ -1507,9 +1514,7 @@ class Coder:
                 if new_content != all_changed[rel]:
                     files_changed += 1
 
-        # One undo snapshot for the whole command
         if all_changed:
-            self.undo_stack.append(all_changed)
             self.last_diffs = []
             for rel, old in all_changed.items():
                 new = (self.root / rel).read_text(encoding="utf-8", errors="replace") if (self.root / rel).exists() else ""

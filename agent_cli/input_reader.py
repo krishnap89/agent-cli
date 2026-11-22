@@ -17,6 +17,7 @@ import sys
 from typing import TYPE_CHECKING, Optional
 
 from rich.console import Console
+from rich.prompt import Confirm as RichConfirm
 from rich.text import Text
 
 if TYPE_CHECKING:
@@ -146,6 +147,22 @@ class _BracketedPaste:
 
 def _clean(line: str) -> str:
     return line.replace(PASTE_START, "").replace(PASTE_END, "")
+
+
+# ---- yes/no questions ----------------------------------------------------------
+
+class Confirm(RichConfirm):
+    """rich's Confirm, where Ctrl-D means no. The end of piped input still aborts."""
+
+    @classmethod
+    def get_input(cls, *args, **kwargs) -> str:
+        try:
+            return super().get_input(*args, **kwargs)
+        except EOFError:
+            if not sys.stdin.isatty():
+                raise
+            console.print("n")
+            return "n"
 
 
 # ---- public API ----------------------------------------------------------------

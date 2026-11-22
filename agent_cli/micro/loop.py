@@ -452,10 +452,9 @@ class MicroOrchestrator:
             console.print(f"[yellow]Reviewer flagged: {plain_math(notes or '(no note)')}[/yellow]")
         return ok, notes
 
-    # ---- finish: undo snapshot + Summarizer ----
+    # ---- finish: diffs + Summarizer ----
 
     def _finish(self, request: str, changed: Dict[str, Optional[str]]) -> None:
-        self.coder.undo_stack.append(changed)
         self.coder.last_diffs = []
         all_diffs = []
         for rel, old in changed.items():

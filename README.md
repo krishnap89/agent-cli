@@ -125,6 +125,8 @@ repo map and settings:
   it and re-send your request.
 - /micro <request> runs the request through the micro-agent loop (see below).
 - /cd [folder] switches to another folder (see "Switching folders").
+- /undo also reverts the edits of a request you stopped with Ctrl-C. Ctrl-D at a
+  yes/no question means no.
 - /undo, /diff, /run <cmd> (optionally share output), /tokens, /map, /clear, /reset.
 - /lint runs syntax checks; /test runs AGENT_TEST_CMD; /autotest on|off toggles auto-test after edits.
 - /review [target] reviews code changes (see below).
