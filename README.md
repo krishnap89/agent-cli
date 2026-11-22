@@ -13,6 +13,7 @@ system prompt and the agent parses `<tool_call>` blocks from plain text.
     export AGENT_API_KEY=not-needed                 # set if your server requires one
 
 ## Use
+    agent --version                         # show the version (also on coder, agent-ui, agent-playground)
     agent --check                           # test server, list model names
     agent                                   # interactive REPL
     agent "add type hints to utils.py"

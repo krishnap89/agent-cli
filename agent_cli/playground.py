@@ -23,6 +23,7 @@ from .agent import (THINK_RE, parse_action_calls, parse_tool_calls, render_tool_
                     response_tag, strip_thinking)
 from .config import ACTION_SYSTEM_PROMPT, CHAT_SYSTEM_PROMPT, SYSTEM_PROMPT, Config
 from .llm import CUT_OFF_REASONS, _parse_full, clean_content, iter_stream_events, list_models, open_stream
+from .version import VERSION_OPTION
 
 app = typer.Typer(add_completion=False)
 
@@ -297,6 +298,7 @@ def main(
     no_open: bool = typer.Option(False, "--no-open", help="Don't open the browser"),
     base_url: Optional[str] = typer.Option(None, "--base-url", "-u", help="OpenAI-compatible endpoint"),
     model: Optional[str] = typer.Option(None, "--model", "-m", help="Model to start with"),
+    version: bool = VERSION_OPTION,
 ):
     """Open a playground for checking LLM responses."""
     cfg = Config()

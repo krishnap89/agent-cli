@@ -51,6 +51,7 @@ from .testgen import (
     find_junit_xml, parse_junit_xml, format_report, parse_bug_classifications,
     _package_from_file, KIND_RULES,
 )
+from .version import VERSION_OPTION
 
 console = Console()
 
@@ -1628,6 +1629,7 @@ def main(
     test_gen: Optional[str] = typer.Option(None, "--test-gen", help="Generate tests for a Kotlin class and exit."),
     doc: Optional[str] = typer.Option(None, "--doc", help="Add KDoc/Javadoc to a Kotlin or Java target (class, file, folder) and exit."),
     doc_update: bool = typer.Option(False, "--doc-update", help="Update outdated KDoc instead of adding new."),
+    version: bool = VERSION_OPTION,
 ):
     cfg = Config(workdir=workdir.resolve(), auto_approve=yes)
     if model:

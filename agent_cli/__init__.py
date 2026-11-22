@@ -19,6 +19,8 @@ still runs on a bare install.
 import os
 from pathlib import Path
 
+__version__ = "0.1.0"
+
 
 def _load_env() -> None:
     try:

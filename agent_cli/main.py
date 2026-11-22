@@ -15,6 +15,7 @@ from .review import collect_material, material_branch_note, build_review_message
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
 from .turns import prompt_header
 from .term import safe_markup
+from .version import VERSION_OPTION
 from .writing import handle as handle_writing
 
 cli = typer.Typer(add_completion=False)
@@ -49,6 +50,7 @@ def main(
     show_map: Optional[str] = typer.Option(None, "--map", help='Print the repo map and exit. Use --map "" or --map "query".'),
     init_notes: bool = typer.Option(False, "--init-notes", help="Generate AGENT.md project notes."),
     review: Optional[str] = typer.Option(None, "--review", help="Review changes and exit."),
+    version: bool = VERSION_OPTION,
 ):
     cfg = Config(workdir=workdir.resolve(), auto_approve=yes)
     if model:

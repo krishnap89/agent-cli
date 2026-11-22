@@ -33,6 +33,7 @@ from .review import (
     collect_material, needs_split, split_material_by_file,
     build_review_messages, build_merge_messages, material_branch_note,
 )
+from .version import VERSION_OPTION
 
 app = typer.Typer(add_completion=False)
 
@@ -712,6 +713,7 @@ def main(
     port: int = typer.Option(0, "--port", "-p", help="Port (0 = random available)"),
     no_open: bool = typer.Option(False, "--no-open", help="Don't open the browser"),
     workdir: Path = typer.Option(Path.cwd(), "--workdir", "-w", help="Project directory"),
+    version: bool = VERSION_OPTION,
 ):
     """Start the web UI for the coder."""
     cfg = Config(workdir=workdir.resolve())
