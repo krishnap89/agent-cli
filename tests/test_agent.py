@@ -1,8 +1,20 @@
 """Tests for tool-call parsing in agent mode."""
+import io
+import json
+import re
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
-from agent_cli.agent import (parse_action_calls, parse_tool_calls,
-                             strip_action_blocks, thinking_gist)
+from rich.console import Console
+
+from agent_cli import llm, playground
+from agent_cli.agent import (Agent, parse_action_calls, parse_tool_calls,
+                             strip_action_blocks, strip_thinking, thinking_gist)
+from agent_cli.config import Config
+from agent_cli.llm import Reply
+from agent_cli.skills import format_skill_context, load_skills
 
 
 class ParseToolCallsTest(unittest.TestCase):
@@ -124,6 +136,112 @@ class ThinkingGistTest(unittest.TestCase):
         self.assertTrue(gist.endswith("..."))
 
 
+class ActionWordingTest(unittest.TestCase):
+    """In action format nothing the agent sends says "tool"."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.cfg = Config(workdir=self.root, tool_format="action", use_map=False,
+                          notes_enabled=False, auto_approve=True,
+                          jira_url="https://x.example", jira_email="a@b.c", jira_token="t")
+
+    def sent(self, first, reasoning="", prompt="hello"):
+        """All text sent to the model while it replies `first`, then finishes."""
+        replies, sent = iter([Reply(first, "stop", reasoning), Reply("ok", "stop", "")]), []
+
+        def chat(cfg, messages, stop=None, **kwargs):
+            sent.extend(m["content"] for m in messages if m["role"] != "assistant")
+            sent.extend(stop or [])
+            return next(replies)
+
+        with mock.patch("agent_cli.agent.chat", chat):
+            Agent(self.cfg).ask(prompt)
+        text = "\n".join(sent)
+        self.assertIsNone(re.search("tool", text, re.IGNORECASE), text)
+        return text
+
+    def test_results_and_stop(self):
+        text = self.sent("ACTION list_dir path=.\nACTION list_dir path=.")
+        self.assertIn("# Actions", text)
+        self.assertIn("<action_response>\n[list_dir]", text)
+
+    def test_unknown_action(self):
+        self.assertIn("Unknown action: nope", self.sent("ACTION nope"))
+
+    def test_parse_error(self):
+        self.assertIn("<action_response>\nError:", self.sent("ACTION todo arg={bad"))
+
+    def test_argument_error(self):
+        self.assertIn("missing 1 required", self.sent("ACTION read_file"))
+        error = TypeError("Tools.t_search() missing 'pattern'")  # Python 3.10+ wording
+        with mock.patch("agent_cli.tools.Tools.run", side_effect=error):
+            self.assertIn("Error: search() missing", self.sent("ACTION search"))
+
+    def test_empty_reply_nudges(self):
+        self.assertIn("empty reply. Write an ACTION line", self.sent(""))
+        self.assertIn("Now do it: Write an ACTION line", self.sent("", reasoning="hmm"))
+
+    def test_file_nudge_example_works(self):
+        text = self.sent("```\nhello\n```", prompt="create a file notes.md")
+        example = re.search(r"ACTION write_file path=<path>\n.*?CONTENT>>>", text, re.S).group()
+        self.sent(example.replace("<path>", "notes.md").replace("<full content>", "one\ntwo"))
+        self.assertEqual((self.root / "notes.md").read_text(), "one\ntwo\n")
+
+    def test_file_with_thinking_tags_and_tokens_is_saved_intact(self):
+        for body in ("a <think>b</think> c\n", "only <think> opens\n", "only </think> closes\n",
+                     "token <|im_end|> kept\n"):
+            self.sent(f"<think>plan</think>ACTION write_file path=t.md\n<<<CONTENT\n{body}CONTENT>>>")
+            self.assertEqual((self.root / "t.md").read_text(), body)
+
+    def test_draft_inside_thinking_is_not_written(self):
+        draft = "ACTION write_file path=d.md\n<<<CONTENT\ndraft\nCONTENT>>>\n"
+        for reply in (f"<think>\n{draft}</think>Answer", f"plan\n{draft}</think>Answer"):
+            self.sent(reply)
+            self.assertFalse((self.root / "d.md").exists())
+
+    def test_bundled_skills_fit_the_default_budget(self):
+        skills = load_skills(Path(__file__).resolve().parent.parent)
+        for skill in skills:
+            if skill.name in ("click-dummy", "readme-gen", "big-task"):
+                self.assertLessEqual(len(skill.body), Config().skill_chars, skill.name)
+
+    def test_edit_with_thinking_tags_is_saved_intact(self):
+        for new in ("a <think>b</think> c", "only </think> closes", "token <|im_end|> kept"):
+            (self.root / "e.md").write_text("x\n")
+            self.sent(f"<think>plan</think>ACTION edit_file path=e.md\n<<<OLD\nx\nOLD\n<<<NEW\n{new}\nNEW")
+            self.assertEqual((self.root / "e.md").read_text(), new + "\n")
+
+    def test_cut_off_edit_leaves_the_file_alone(self):
+        (self.root / "e.py").write_text("x\n")
+        for end in ("half", "half\nNEW"):  # the second: cut inside "NEW_LIMIT = 5"
+            replies = iter([Reply(f"ACTION edit_file path=e.py\n<<<OLD\nx\nOLD\n<<<NEW\n{end}",
+                                  "length", ""), Reply("ok", "stop", "")])
+            with mock.patch("agent_cli.agent.chat", lambda *a, **k: next(replies)):
+                Agent(self.cfg).ask("edit it")
+            self.assertEqual((self.root / "e.py").read_text(), "x\n")
+
+    def test_bundled_skills(self):
+        skills = load_skills(Path(__file__).resolve().parent.parent)
+        for skill in skills:
+            if skill.name in ("click-dummy", "readme-gen", "big-task"):
+                with self.subTest(skill.name):
+                    self.sent("ok", prompt="hello\n" + format_skill_context(skill, 100_000))
+
+    def test_markup_like_content_does_not_crash_the_preview(self):
+        self.cfg.auto_approve = False  # so the diff preview is printed
+        body = "re = /[/]/\n[/red] [bold]\nends in \\\n"
+        with mock.patch("agent_cli.tools.Confirm.ask", return_value=True):
+            self.sent(f"ACTION write_file path=m.js\n<<<CONTENT\n{body}CONTENT>>>")
+        self.assertEqual((self.root / "m.js").read_text(), body)
+
+    def test_playground_preset(self):
+        preset = playground.defaults(self.cfg)["presets"]["agent"]
+        self.assertNotIn("tool", preset["system"].lower())
+        self.assertEqual(preset["stop"], "<action_response>")
+
+
 class ParseActionCallsTest(unittest.TestCase):
     """The ACTION-line tool protocol (cfg.tool_format == 'action')."""
 
@@ -153,6 +271,43 @@ class ParseActionCallsTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(calls, [{"name": "run_command", "arguments": {
             "command": "./gradlew :app:assembleDebug --offline"}}])
+
+    def test_command_is_the_whole_rest_of_the_line(self):
+        for command in ("make clean DESTDIR=/tmp/x", "FOO=1 make A=2", "echo a command=b",
+                        "git log --format=%h  -1", "true", "42", "echo 'a  b'"):
+            with self.subTest(command=command):
+                self.assertEqual(parse_action_calls(f"ACTION run_command command={command}"), (
+                    [{"name": "run_command", "arguments": {"command": command}}], []))
+
+    def test_only_the_actions_own_names_split_values(self):
+        for line, expected in (
+            ("search pattern=val x = a b=c path=src regex=false",
+             {"pattern": "val x = a b=c", "path": "src", "regex": False}),
+            ("search path=src pattern=a b=c", {"path": "src", "pattern": "a b=c"}),
+            ("search pattern=x --path=y", {"pattern": "x --path=y"}),
+            ("jira_search jql=project = AB AND status=Done max_results=5",
+             {"jql": "project = AB AND status=Done", "max_results": 5}),
+        ):
+            with self.subTest(line=line):
+                calls, errors = parse_action_calls(f"ACTION {line}")
+                self.assertEqual((calls[0]["arguments"], errors), (expected, []))
+
+    def test_string_args_stay_strings(self):
+        for line, expected in (("search pattern=404", {"pattern": "404"}),
+                               ("search pattern=true", {"pattern": "true"}),
+                               ("list_dir path=2024", {"path": "2024"})):
+            self.assertEqual(parse_action_calls(f"ACTION {line}")[0][0]["arguments"], expected)
+
+    def test_edit_path_is_not_cut_at_an_equals_sign(self):
+        calls, _ = parse_action_calls("ACTION edit_file path=a b=c.kt\n<<<OLD\nx\nOLD\n<<<NEW\ny\nNEW")
+        self.assertEqual(calls[0]["arguments"]["path"], "a b=c.kt")
+
+    def test_text_that_is_not_an_argument_is_reported(self):
+        for line in ("list_dir src", "search Login"):
+            with self.subTest(line=line):
+                calls, errors = parse_action_calls(f"ACTION {line}\nACTION repo_map")
+                self.assertEqual([c["name"] for c in calls], ["repo_map"])
+                self.assertIn("must start with one of", errors[0])
 
     def test_boolean_arg(self):
         calls, errors = parse_action_calls("ACTION search pattern=Login regex=true")
@@ -219,7 +374,424 @@ class ParseActionCallsTest(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
+class WriteBlockTest(unittest.TestCase):
+    HEAD = "ACTION write_file path=a.md\n<<<CONTENT\n"
+
+    def write(self, body):
+        return parse_action_calls(f"{self.HEAD}{body}CONTENT>>>")
+
+    def test_content_is_verbatim(self):
+        for body in ("", "\n", "one\n", "  indented\n\n\n", 'say "hi" \\n a=b\n',
+                     "page\fbreak\u2028line\n", "  <<<CONTENT\n  CONTENT>>>\n",
+                     "<<<OLD\nOLD\n<<<NEW\nNEW\n"):
+            with self.subTest(body=body):
+                self.assertEqual(self.write(body), (
+                    [{"name": "write_file", "arguments": {"path": "a.md", "content": body}}], []))
+
+    def test_actions_inside_content_do_not_run(self):
+        calls, errors = self.write("ACTION run_command command=rm -rf build\n")
+        self.assertEqual([c["name"] for c in calls], ["write_file"])
+        self.assertEqual(errors, [])
+
+    def test_path_with_spaces(self):
+        calls, _ = parse_action_calls("ACTION write_file path=my notes.md\n<<<CONTENT\nCONTENT>>>")
+        self.assertEqual(calls[0]["arguments"]["path"], "my notes.md")
+
+    def test_crlf(self):
+        calls, _ = parse_action_calls((self.HEAD + "a\nb\nCONTENT>>>").replace("\n", "\r\n"))
+        self.assertEqual(calls[0]["arguments"]["content"], "a\nb\n")
+
+    def test_several_calls_around_blocks(self):
+        calls, errors = parse_action_calls(
+            f"ACTION list_dir path=.\n{self.HEAD}x\nCONTENT>>>\n"
+            f"{self.HEAD}y\nCONTENT>>>\nACTION list_dir path=.")
+        self.assertEqual([c["name"] for c in calls],
+                         ["list_dir", "write_file", "write_file", "list_dir"])
+        self.assertEqual(errors, [])
+
+    def test_unclear_block_runs_nothing_from_there_on(self):
+        danger = "ACTION run_command command=rm -rf build\n"
+        end = "CONTENT>>>\n"
+        for reply in (
+            self.HEAD + danger,                                  # cut off
+            self.HEAD + danger + "  " + end,                     # indented close
+            "ACTION write_file path=a.md\n" + danger,            # no opening
+            "ACTION write_file path=a.md content=first\n" + danger,
+            "ACTION write_file\n<<<CONTENT\n" + danger + end,    # no path
+            "<<<CONTENT\n" + danger + end,                       # no ACTION line
+            self.HEAD + "x\n" + end + danger + end,              # close marker in content
+            self.HEAD + "<<<CONTENT\n" + end + danger + end,     # nested block
+            self.HEAD + "x\n" + self.HEAD + danger + end,        # first block left open
+        ):
+            with self.subTest(reply=reply):
+                calls, errors = parse_action_calls("ACTION list_dir path=.\n" + reply)
+                self.assertEqual([c["name"] for c in calls], ["list_dir"])
+                self.assertEqual(len(errors), 1)
+                self.assertNotIn("rm -rf", strip_action_blocks(reply))
+
+
+class EditBlockTest(unittest.TestCase):
+    HEAD = "ACTION edit_file path=a.kt\n<<<OLD\nx\nOLD\n<<<NEW\n"
+
+    def test_indented_marker_word_is_content(self):
+        calls, errors = parse_action_calls(self.HEAD + "enum class S {\n    NEW\n}\nNEW")
+        self.assertEqual(errors, [])
+        self.assertEqual(calls[0]["arguments"]["new_str"], "enum class S {\n    NEW\n}")
+
+    def test_empty_new_deletes(self):
+        calls, errors = parse_action_calls(self.HEAD + "NEW")
+        self.assertEqual((calls[0]["arguments"]["new_str"], errors), ("", []))
+
+    def test_two_edits(self):
+        calls, errors = parse_action_calls(f"{self.HEAD}one\nNEW\n{self.HEAD}two\nNEW")
+        self.assertEqual([c["arguments"]["new_str"] for c in calls], ["one", "two"])
+        self.assertEqual(errors, [])
+
+    def test_unclear_edit_runs_nothing_from_there_on(self):
+        danger = "ACTION run_command command=rm -rf build\n"
+        start = "ACTION edit_file path=a.kt\n"
+        for reply in (
+            self.HEAD + danger,                              # NEW not closed
+            self.HEAD + danger + "  NEW",                    # indented close
+            self.HEAD + "one\n" + self.HEAD + danger + "NEW",  # first edit left open
+            self.HEAD + "a\nNEW\n" + danger + "NEW",         # close marker in content
+            start + danger,                                  # no blocks
+            start + "<<<OLD\n" + danger,                     # OLD not closed
+            start + "<<<OLD\nx\nOLD\n" + danger,             # no NEW
+            "ACTION edit_file\n<<<OLD\n" + danger + "OLD\n<<<NEW\nNEW",  # no path
+            "<<<OLD\n" + danger + "OLD",                     # no ACTION line
+        ):
+            with self.subTest(reply=reply):
+                calls, errors = parse_action_calls("ACTION list_dir path=.\n" + reply)
+                self.assertEqual([c["name"] for c in calls], ["list_dir"])
+                self.assertEqual(len(errors), 1)
+                self.assertNotIn("rm -rf", strip_action_blocks(reply))
+
+
+class RunFailureTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.cfg = Config(workdir=self.root, tool_format="xml", use_map=False,
+                          notes_enabled=False, auto_approve=True)
+
+    def test_exception_in_second_call_keeps_both_results(self):
+        (self.root / "a").write_text("hi")
+        reply = ('<tool_call>{"name": "write_file", "arguments": {"path": "b", "content": "B"}}</tool_call>'
+                 '<tool_call>{"name": "read_file", "arguments": {"path": "a", "start_line": "abc"}}</tool_call>')
+        replies, seen = iter([Reply(reply, "stop", ""), Reply("ok", "stop", "")]), []
+
+        def chat(cfg, messages, **kwargs):
+            seen.append(messages[-1]["content"])
+            return next(replies)
+
+        with mock.patch("agent_cli.agent.chat", chat):
+            Agent(self.cfg).ask("go")
+        self.assertIn("[write_file]\nWrote b", seen[1])
+        self.assertIn("[read_file]\nError: invalid literal", seen[1])
+
+    def test_exception_without_message_is_named(self):
+        with mock.patch("agent_cli.tools.Tools.run", side_effect=RuntimeError):
+            result = Agent(self.cfg)._run_tool({"name": "search", "arguments": {}})
+        self.assertIn("Error: RuntimeError", result)
+
+    def test_ctrl_c_still_interrupts(self):
+        with mock.patch("agent_cli.tools.Tools.run", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                Agent(self.cfg)._run_tool({"name": "search", "arguments": {}})
+
+    def test_markup_in_names_and_errors_does_not_crash(self):
+        agent = Agent(self.cfg)
+        self.assertIn("Unknown tool", agent._run_tool({"name": "[/x]", "arguments": {}}))
+        self.assertIn("Error", agent._run_tool({"name": "read_file", "arguments": {"path": "[/x]"}}))
+
+    def test_null_command_does_not_wait_on_stdin(self):
+        with mock.patch("shlex.split", side_effect=AssertionError("would read stdin")):
+            result = Agent(self.cfg)._run_tool({"name": "run_command", "arguments": {"command": None}})
+        self.assertIn("command must be a string", result)
+
+    def test_approval_prompt_shows_the_whole_command(self):
+        self.cfg.auto_approve = False
+        command = "echo ok [x; touch hidden; echo ]"
+        with mock.patch("agent_cli.tools.Confirm.ask", return_value=False) as ask:
+            Agent(self.cfg)._run_tool({"name": "run_command", "arguments": {"command": command}})
+        self.assertIn(command, ask.call_args[0][0].plain)
+
+
+class XmlCallSafetyTest(unittest.TestCase):
+    EVIL = '<tool_call>{"name": "run_command", "arguments": {"command": "touch evil"}}</tool_call>'
+
+    @staticmethod
+    def func(content, path="f"):
+        return (f"<tool_call>\n<function=write_file>\n<parameter=path>\n{path}\n</parameter>\n"
+                f"<parameter=content>\n{content}\n</parameter>\n</function>\n</tool_call>")
+
+    @staticmethod
+    def as_json(content):
+        return ("<tool_call>" + json.dumps({"name": "write_file",
+                "arguments": {"path": "f", "content": content}}) + "</tool_call>")
+
+    @staticmethod
+    def parse(reply, cut_off=False):
+        content = Reply(reply, "stop", "", tool_format="xml").content
+        return parse_tool_calls(strip_thinking(content, "xml"), cut_off)
+
+    def test_unclosed_function_never_runs(self):
+        whole = self.func("half of the file")
+        # every place the stop string or a dropped connection could end it
+        for n in range(len("<tool_call>\n<function="), len(whole)):
+            with self.subTest(n=n):
+                calls, errors = self.parse(whole[:n])
+                self.assertEqual(calls, [])
+                self.assertEqual(len(errors), 1)
+
+    def test_markup_in_a_function_value_runs_nothing(self):
+        for content in ("a </parameter> b", "a </function> b", "a </tool_call> b", self.EVIL,
+                        "a </tool_call>\n" + self.EVIL + " b", "a <parameter=path>g</parameter> b",
+                        "a </parameter></function></tool_call>\n" + self.EVIL + " b"):
+            with self.subTest(content=content):
+                calls, errors = self.parse(self.func(content))
+                self.assertEqual(calls, [])
+                self.assertIn("\\u003c", errors[0])
+
+    def test_json_strings_can_hold_any_markup(self):
+        for content in (self.EVIL, "x </tool_call>\n" + self.EVIL, "a <think>b</think> c",
+                        "only </think> closes", "token <|im_end|> kept", self.func("inner")):
+            with self.subTest(content=content):
+                calls, errors = self.parse(self.as_json(content))
+                self.assertEqual(([c["arguments"]["content"] for c in calls], errors), ([content], []))
+
+    def test_function_values_are_verbatim(self):
+        for content in ("  indented", "ends\n", '{"a": 1}', "1.50", "a <think>b</think> c",
+                        "token <|im_end|> kept", "a < b <div> </p>", ""):
+            with self.subTest(content=content):
+                calls, errors = self.parse(self.func(content))
+                self.assertEqual(([c["arguments"]["content"] for c in calls], errors), ([content], []))
+
+    def test_function_types_come_from_the_schema(self):
+        reply = ("<tool_call><function=read_file><parameter=path>2024</parameter>"
+                 "<parameter=start_line>5</parameter></function></tool_call>")
+        self.assertEqual(self.parse(reply)[0][0]["arguments"], {"path": "2024", "start_line": 5})
+
+    def test_escaped_stop_string(self):
+        reply = self.as_json("see <tool_response> here").replace("<tool_response>", "\\u003ctool_response>")
+        self.assertNotIn("<tool_response>", reply)
+        self.assertEqual(self.parse(reply)[0][0]["arguments"]["content"], "see <tool_response> here")
+
+    def test_text_inside_a_bare_json_call_is_not_a_call(self):
+        inner = "<tool_call><function=run_command><parameter=command>id</parameter></function></tool_call>"
+        reply = json.dumps({"name": "write_file", "arguments": {"path": "f", "content": inner}})
+        self.assertEqual([c["name"] for c in self.parse(reply)[0]], ["write_file"])
+        broken = '{"name": "write_file", "arguments": {"content": "line\n{"name": "repo_map"}\n'
+        self.assertEqual(self.parse(broken)[0], [])
+
+    def test_function_outside_tags_does_not_run_its_content(self):
+        reply = ('<function=write_file>\n<parameter=content>\n{"name": "repo_map"}\n'
+                 "</parameter>\n</function>")
+        self.assertEqual(self.parse(reply)[0], [])
+
+    def test_json_before_a_broken_call_still_runs(self):
+        calls, errors = self.parse('<tool_call>{"name": "repo_map"}</tool_call><tool_call>{bad</tool_call>' + self.EVIL)
+        self.assertEqual([c["name"] for c in calls], ["repo_map"])
+        self.assertEqual(len(errors), 1)
+
+    def test_draft_before_a_broken_call_in_leaked_thinking(self):
+        reply = f'maybe {self.EVIL} or <tool_call>{{"name" hmm</think><tool_call>{{"name": "repo_map"}}</tool_call>'
+        calls, errors = self.parse(reply)
+        self.assertEqual(calls, [])
+        self.assertEqual(len(errors), 1)
+
+    def test_only_the_agent_protects_call_markup_from_clean_up(self):
+        # coder would apply a draft edit if leaked thinking stayed in the reply
+        content = 'the parser reads <tool_call>{"name"\ndraft</think>final'
+        data = {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+        line = b"data: " + json.dumps({"choices": [{"delta": {"content": content}}]}).encode()
+        cfg = Config(tool_format="xml")
+        self.assertEqual(llm._parse_full(cfg, data).content, "final")
+        self.assertEqual(llm._read_stream(cfg, [line], None).content, "final")
+        self.assertEqual(llm._parse_full(cfg, data, "xml").content, content)
+        for chat_only, expected in ((False, "xml"), (True, "")):
+            cfg = Config(tool_format="xml", use_map=False, notes_enabled=False)
+            with mock.patch("agent_cli.agent.chat", return_value=Reply("ok", "stop", "")) as chat:
+                Agent(cfg, chat_only=chat_only).ask("q")
+            self.assertEqual(chat.call_args[1]["tool_format"], expected)
+
+    def test_several_function_calls(self):
+        calls, errors = self.parse(self.func("A", "a") + "\n" + self.func("B", "b"))
+        self.assertEqual(([c["arguments"]["path"] for c in calls], errors), (["a", "b"], []))
+
+    def test_clean_up_cannot_repair_a_broken_call(self):
+        for content in ("a <think></function></think> b", "a <think><tool_call>x</think> b",
+                        "a </tool_call><|im_end|> b", "a </function></think> b"):
+            with self.subTest(content=content):
+                calls, errors = self.parse(self.func(content))
+                self.assertEqual(calls, [])
+                self.assertEqual(len(errors), 1)
+
+    def test_draft_in_thinking_is_not_run(self):
+        for reply in (f"<think>{self.EVIL}</think>Answer", f"plan {self.EVIL}</think>Answer"):
+            self.assertEqual(self.parse(reply)[0], [])
+
+
+class CutOffTest(unittest.TestCase):
+    def test_last_action_of_a_cut_off_reply_is_not_run(self):
+        for last in ("ACTION run_command command=rm -rf build",
+                     'ACTION apply_patch arg=[{"path": "a", "old_str": "x", "new_str": "y"}]',
+                     "ACTION edit_file path=a\n<<<OLD\nx\nOLD\n<<<NEW\ny\nNEW\nmore code"):
+            with self.subTest(last=last):
+                calls, errors = parse_action_calls("ACTION list_dir path=.\n" + last, cut_off=True)
+                self.assertEqual([c["name"] for c in calls], ["list_dir"])
+                self.assertIn("cut off", errors[0])
+
+    def test_broken_last_action_does_not_drop_the_one_before(self):
+        calls, errors = parse_action_calls("ACTION list_dir path=.\nACTION todo arg={bad", cut_off=True)
+        self.assertEqual([c["name"] for c in calls], ["list_dir"])
+        self.assertEqual(len(errors), 1)
+
+    def test_xml_function_must_be_closed_when_cut_off(self):
+        open_call = "<tool_call><function=run_command><parameter=command>rm -rf build"
+        for reply in (open_call, open_call + "</tool_call>"):
+            self.assertEqual(parse_tool_calls(reply, cut_off=True)[0], [])
+        closed = open_call + "</parameter></function></tool_call>"
+        self.assertEqual(len(parse_tool_calls(closed, cut_off=True)[0]), 1)
+
+    def test_complete_json_call_runs_when_cut_off(self):
+        reply = '<tool_call>{"name": "repo_map"}</tool_call> and then'
+        self.assertEqual(len(parse_tool_calls(reply, cut_off=True)[0]), 1)
+
+    def test_stream_that_just_stops_is_incomplete(self):
+        piece = b'data: {"choices":[{"delta":{"content":"hi"}}]}'
+        finish = b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}'
+        for lines, expected in (([piece], "incomplete"), ([piece, b"data: [DONE]"], ""),
+                                ([piece, finish], "stop")):
+            self.assertEqual(llm._read_stream(Config(), lines, None).finish_reason, expected)
+
+    def test_cut_off_command_is_never_executed(self):
+        for fmt, text in (("action", "ACTION run_command command=rm -rf build"),
+                          ("xml", "<tool_call><function=run_command><parameter=command>rm -rf build")):
+            for reason in llm.CUT_OFF_REASONS:
+                with self.subTest(fmt=fmt, reason=reason), tempfile.TemporaryDirectory() as tmp:
+                    cfg = Config(workdir=Path(tmp), tool_format=fmt, use_map=False,
+                                 notes_enabled=False, auto_approve=True)
+                    replies = iter([Reply(text, reason, ""), Reply("ok", "stop", "")])
+                    with mock.patch("agent_cli.agent.chat", lambda *a, **k: next(replies)), \
+                            mock.patch("agent_cli.tools.Tools.run") as run:
+                        Agent(cfg).ask("clean up")
+                    run.assert_not_called()
+
+
+class ScreenSafetyTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.cfg = Config(workdir=Path(tmp.name), use_map=False, notes_enabled=False,
+                          auto_approve=False)
+        self.agent = Agent(self.cfg)
+        self.out = io.StringIO()
+        screen = Console(file=self.out, width=200, emoji=False)
+        for module in ("agent", "tools"):
+            patcher = mock.patch(f"agent_cli.{module}.console", screen)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def approve(self, action):
+        with mock.patch("agent_cli.tools.Confirm.ask", return_value=False) as ask:
+            self.agent.tools._confirm(action)
+        return ask.call_args[0][0].plain, ask.call_args[1]["default"]
+
+    def test_hidden_characters_are_shown_and_enter_means_no(self):
+        for char, code in (("\x1b", "\\x1b"), ("\r", "\\r"), ("\x9b", "\\x9b"), ("\x7f", "\\x7f"),
+                           ("\u202e", "\\u202e"), ("\u200b", "\\u200b"), ("\u3164", "\\u3164"),
+                           ("\ud800", "\\ud800")):
+            with self.subTest(code=code):
+                shown, default = self.approve(f"run `a{char}b`")
+                self.assertIn(f"a{code}b", shown)
+                self.assertFalse(default)
+
+    def test_enter_means_yes_only_for_short_visible_actions(self):
+        for action, expected in (("run `./gradlew test`", True), ("run `cat <<E\nhi\nE`", True),
+                                 ("run `echo :smile: caf\u00e9`", True),
+                                 ("run `" + " " * 600 + "`", False), ("run `" + "\n" * 12 + "`", False)):
+            self.assertEqual(self.approve(action), (f"Allow: {action}", expected))
+
+    def test_diff_shows_every_changed_line(self):
+        self.agent.tools._show_diff("f", "-- old\nok\n", "ok\n++ ; touch x\ncp :smile: \x1b[8m\rz\n")
+        shown = self.out.getvalue()
+        for part in ("--- old", "+++ ; touch x", "cp :smile: \\x1b[8m\\rz", "(+2 -1)"):
+            self.assertIn(part, shown)
+
+    def test_hidden_characters_in_written_content_make_enter_no(self):
+        (self.agent.tools.root / "e").write_text("x\n")
+        for body, expected in (("ok\n", True), ("a\x1b[8m\n", False), ("line\n" * 80 + "\u202e\n", False)):
+            for name, args in (("write_file", {"path": "n", "content": body}),
+                               ("edit_file", {"path": "e", "old_str": "x", "new_str": body}),
+                               ("apply_patch", {"edits": [{"path": "p", "new_str": body}]})):
+                with self.subTest(name=name, body=body[-10:]):
+                    with mock.patch("agent_cli.tools.Confirm.ask", return_value=False) as ask:
+                        self.agent.tools.run(name, args)
+                    self.assertEqual(ask.call_args[1]["default"], expected)
+
+    def test_model_text_cannot_drive_the_terminal(self):
+        reply = Reply("answer \x1b[2J `\x1b[8m`", "stop", "check the [/x] tag \x1b]0;title\x07")
+        self.cfg.show_thinking = True
+        with mock.patch("agent_cli.agent.chat", return_value=reply):
+            self.agent.ask("q")
+        self.assertNotIn("\x1b", self.out.getvalue())
+        self.assertIn("check the [/x] tag", self.out.getvalue())
+
+
+class CommandBlockTest(unittest.TestCase):
+    HEAD = "ACTION run_command\n<<<COMMAND\n"
+    BODY = "\nACTION list_dir path=.\n"
+
+    def test_block_is_verbatim(self):
+        for command in ("cat > f <<EOF\nhello\nACTION list_dir path=.\nEOF",
+                        "rm -rf \\\n  build", "echo '<think>x</think>'", "make A=1\n\nmake test"):
+            with self.subTest(command=command):
+                text = strip_thinking(Reply(f"{self.HEAD}{command}\nCOMMAND>>>", "stop", "").content,
+                                      "action")
+                self.assertEqual(parse_action_calls(text), (
+                    [{"name": "run_command", "arguments": {"command": command}}], []))
+                self.assertEqual(strip_action_blocks(text), "")
+
+    def test_one_line_that_needs_more_runs_nothing_from_there_on(self):
+        for command in ("cat > f <<EOF", "cat <<-'E'", 'echo "$(cat <<E', "rm -rf \\", 'python3 -c "',
+                        "echo $'a", "cat f |", "make &&", "a ||", "for f in *; do", "for f in *",
+                        "if true; then", "case $x in", "f() {", "cat a\\ #b <<EOF", "echo $(", "echo `date", "(cd app",
+                        "", "<<<COMMAND"):
+            with self.subTest(command=command):
+                calls, errors = parse_action_calls(
+                    f"ACTION repo_map\nACTION run_command command={command}{self.BODY}")
+                self.assertEqual([c["name"] for c in calls], ["repo_map"])
+                self.assertEqual(len(errors), 1)
+
+    def test_whole_one_line_commands_still_run(self):
+        for command in ("make test 2>&1 | tail -40", "find . -name '*.py' -exec wc -l {} \\;",
+                        "for f in *; do echo $f; done", "if true; then echo y; fi", "echo $((1<<2))",
+                        "cat <<< hi", "echo '<<EOF'", "echo done # it's fine", "{ echo a; echo b; }",
+                        "case $x in a) echo a;; esac", "echo $#", "sleep 1 &", "echo if for while",
+                        'echo "$(git log --format=\'%h\' -1)"', "awk '{print $1}' f"):
+            with self.subTest(command=command):
+                self.assertEqual(parse_action_calls(f"ACTION run_command command={command}"), (
+                    [{"name": "run_command", "arguments": {"command": command}}], []))
+
+    def test_unclear_action_runs_nothing_from_there_on(self):
+        for first in ("ACTION run_command cmd=ls", "ACTION run_command", self.HEAD + "echo hi",
+                      self.HEAD + "COMMAND>>>", "<<<COMMAND", "ACTION bash command=cat <<EOF",
+                      "ACTION run_command command=bash\n<<<COMMAND",
+                      'ACTION apply_patch arg=[{"path": "f", "new_str": "line one'):
+            with self.subTest(first=first):
+                calls, errors = parse_action_calls(first + self.BODY)
+                self.assertEqual(calls, [])
+                self.assertEqual(len(errors), 1)
+
+
 class StripActionBlocksTest(unittest.TestCase):
+    def test_strips_write_block(self):
+        text = "Writing.\nACTION write_file path=a\n<<<CONTENT\n<h1>x</h1>\nCONTENT>>>\nDone."
+        self.assertEqual(strip_action_blocks(text), "Writing.\nDone.")
+
     def test_strips_action_lines_keeps_prose(self):
         text = "I'll look first.\nACTION list_dir path=.\nACTION search pattern=Login"
         self.assertEqual(strip_action_blocks(text), "I'll look first.")

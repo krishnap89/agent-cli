@@ -103,11 +103,11 @@ def set_reporter(fn: Optional[Reporter]) -> None:
 
 def rich_reporter(console) -> Reporter:
     """A reporter that prints to a rich Console: dim info, yellow warnings."""
-    from rich.markup import escape
+    from .term import safe_markup
 
     def report(msg: str, level: str) -> None:
         style = "yellow" if level == "warn" else "dim"
-        console.print(f"[{style}]{escape(msg)}[/{style}]")
+        console.print(f"[{style}]{safe_markup(msg)}[/{style}]")
     return report
 
 

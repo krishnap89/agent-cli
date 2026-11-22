@@ -20,6 +20,7 @@ from rich.prompt import Confirm
 
 from .config import Config
 from .llm import LLMError, chat
+from .term import safe_markup
 
 # Intents the classifier can emit. "chat" means "not a special command: send it
 # to the normal loop" — the safe default.
@@ -142,7 +143,7 @@ def route(cfg: Config, coder: Any, text: str, console: Console) -> bool:
     detail = f"{label} {intent.target}"
     if intent.method:
         detail += f" (method {intent.method})"
-    console.print(f"[dim]\N{RIGHTWARDS ARROW} Detected: {detail}[/dim]")
+    console.print(f"[dim]\N{RIGHTWARDS ARROW} Detected: {safe_markup(detail)}[/dim]")
     if not (cfg.auto_approve or Confirm.ask("Run this?", default=True)):
         # Not what they meant: fall back so the message is handled as chat.
         return False

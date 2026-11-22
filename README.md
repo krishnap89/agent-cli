@@ -67,6 +67,40 @@ Keep AGENT_KEEP_SPECIAL_TOKENS=1 (the default).
 4. Malformed JSON is reported back to the model so it can retry.
 5. A reply with no tool call ends the turn. <think> blocks are stripped.
 
+A call runs only if it can be read whole. Text inside a call's values (file
+content, commands) is never run as a call. The `<function=...>` form needs every
+closing tag and can't carry call tags inside a value; such content, and anything
+containing `<tool_response>` (the stop string), must be sent as JSON with `<`
+written as `\u003c`, which the error tells the model.
+
+## Action format
+For models that return nothing for the markup above, set AGENT_TOOL_FORMAT=action.
+The model then writes `ACTION name key=value` lines and gets results back in an
+action-response block; the text the agent sends says "action" instead of "tool".
+
+`write_file` takes only `path=` on its ACTION line, then the whole file between a
+`<<<CONTENT` line and a `CONTENT>>>` line. If the end of the file is unclear
+(no closing marker, or a repeated one) nothing is written, nothing after it is
+run, and the model is told why. To show the markers inside a file, indent them.
+A `run_command` of several lines goes under a bare `ACTION run_command` line,
+between `<<<COMMAND` and `COMMAND>>>`, with the same rules. A one-line command
+that needs more lines (heredoc, trailing `\`, open quote) is refused, and nothing
+after it is run. The same goes for an unknown action or JSON that doesn't parse.
+`edit_file` follows the same rules for its `<<<OLD` ... `OLD` and `<<<NEW` ... `NEW`
+blocks.
+
+Skills should name actions such as `write_file` without showing call syntax, so
+that they work in both formats.
+
+## Approvals and cut-off replies
+The approval prompt and diff preview show invisible characters as codes such as
+`\x1b`. Enter means yes only for a short action with nothing hidden in it; for
+the others (over 500 chars or 10 lines, or with such characters) type `y`.
+
+When a reply is cut off (token limit, or the stream closed early) a call that may
+be incomplete is not run, and the model is asked to send it again. In action
+format that is always the reply's last action.
+
 ## Extending
 Add a schema to TOOL_SCHEMAS in tools.py and a matching `t_<name>` method.
 
@@ -432,7 +466,7 @@ auto-selected and injected as context (the model doesn't choose skills).
     /skill off           unpin the current skill
     /tokens              shows skill size in the context budget
 
-    AGENT_SKILL_CHARS=3000  # max chars per skill (default 3000)
+    AGENT_SKILL_CHARS=4000  # max chars per skill (default 4000)
 
 ## Code review
 Review code changes with a structured checklist. Works in both coder and agent.

@@ -17,22 +17,10 @@ than none.
 
 ## Output contract
 
-The README is created ONLY by a `write_file` tool call to `README.md` (repo
-root, unless the user names another path). The whole Markdown document goes in
-the tool call's `content` field — NOT in a ```markdown code block, NOT in prose.
-A code block in your reply writes nothing. So your reply is one `write_file`
-tool call and no README text anywhere else.
-
-Emit it in this exact format, as your main action, before any report:
-
-    <tool_call>
-    {"name": "write_file", "arguments": {"path": "README.md", "content": "# Project Name\n\n...the full README, every newline and quote JSON-escaped...\n"}}
-    </tool_call>
-
-The `content` string must be valid JSON: escape every `"` as `\"` and every
-newline as `\n`. Only after the `<tool_response>` confirms the write do you
-reply — one short line. Never claim the README was written without a confirming
-tool response; if none came back, emit the tool call again.
+Create `README.md` (repo root, unless the user names another path) with
+`write_file`, in the format your system prompt gives. Text printed in your reply
+or in a code block is not saved. Report in one line only after the result
+confirms the write.
 
 **If `README.md` already exists, read it first** and preserve anything still
 accurate (badges, license, project description, hand-written notes) rather than
@@ -66,15 +54,14 @@ Before writing, inspect the project and base each section on real evidence:
 ## Workflow
 
 1. **Read the repo** — package metadata, entry points, config reads, the dir
-   tree, and the existing `README.md` if present. Do this with the read/search
-   tools before writing a word.
+   tree, and the existing `README.md` if present. Read and search before
+   writing a word.
 2. **Draft the README** from that evidence — concise, skimmable, with a short
    intro, fenced command blocks for install/usage, and only the sections the
    project warrants. Omit sections you have no evidence for rather than padding.
-3. **Emit the `write_file` tool call** (format above) with the full document in
-   `content`. Do not print the README outside the tool call.
-4. **Wait for the `<tool_response>`**, then reply with one line: the path
-   written and a one-sentence note of what you based it on or changed.
+3. **Write the file** with `write_file`, passing the full document.
+4. **Wait for the result**, then reply with one line: the path written and a
+   one-sentence note of what you based it on or changed.
 
 ## Style
 
