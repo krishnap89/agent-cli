@@ -125,6 +125,9 @@ repo map and settings:
   it and re-send your request.
 - /micro <request> runs the request through the micro-agent loop (see below).
 - /cd [folder] switches to another folder (see "Switching folders").
+- Edits keep a file's line endings (LF, CRLF or mixed), BOM and missing final
+  newline, and /undo restores its exact bytes. Files that aren't UTF-8 text can't be
+  edited, here or in agent-ui: /read them, or convert them to UTF-8 first.
 - /undo also reverts the edits of a request you stopped with Ctrl-C. Ctrl-D at a
   yes/no question means no.
 - /undo, /diff, /run <cmd> (optionally share output), /tokens, /map, /clear, /reset.

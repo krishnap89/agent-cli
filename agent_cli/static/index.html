@@ -1338,11 +1338,12 @@ function escapeAttr(s) {
 }
 
 async function addFile(path, readOnly) {
-  await api("/api/add", {
+  const resp = await api("/api/add", {
     method: "POST",
     headers: {"Content-Type": "application/json"},
     body: JSON.stringify({files: [path], read_only: readOnly}),
   });
+  for (const message of (await resp.json()).refused || []) addMessage("error", message);
   refreshChatFiles();
   updateTokens();
 }

@@ -13,6 +13,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from . import textfile
+
 
 # ---------------------------------------------------------------------------
 # Kotlin declaration scanner
@@ -1094,7 +1096,7 @@ def reindent_kdoc_blocks(source: str) -> str:
     /** ... */ block (one not preceded on its first line by other code) to the
     indentation of the next non-blank, non-annotation line.
     """
-    lines = source.splitlines()
+    lines = textfile.lines(source)
     i = 0
     while i < len(lines):
         stripped = lines[i].strip()

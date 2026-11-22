@@ -400,7 +400,7 @@ class CoderReplTest(ReplCase):
         def with_undo(instance, *args, **kwargs):
             init(instance, *args, **kwargs)
             if not made:  # only the first folder has an edit to undo
-                instance.undo_stack.append({"x.py": "old\n"})
+                instance.undo_stack.append({"x.py": b"old\n"})
             made.append(instance)
 
         seen = []

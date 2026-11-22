@@ -39,10 +39,11 @@ from .review import (
 )
 from .folders import Folders
 from .editblock import EditBlock, EditError, HEAD_RE, UPDATED_RE, apply_edit, parse_edit_blocks, unified_diff
+from .term import safe_markup
 from .input_reader import Confirm, read_message, set_completer
 from .intent import route as route_intent
 from .llm import LLMError, chat, list_models, switch_model
-from . import redact
+from . import redact, textfile
 from .repomap import RepoMap
 from .risk import CheckFacts, callers_not_updated, model_risk_line, risk_note, strip_risk_line
 from .style import with_style
@@ -224,6 +225,14 @@ def _type_in_sources(type_name: str, sources: List[str]) -> bool:
     return False
 
 
+class Refusal(str):
+    """An edit error that asking the model again can't fix."""
+
+
+def cannot_edit(rel: str, why: str) -> str:
+    return f"Can't edit {rel}: {why}."
+
+
 class Coder:
     def __init__(self, cfg: Config, mode: str = "code"):
         self.cfg = cfg
@@ -232,7 +241,8 @@ class Coder:
         self.editable: Dict[str, None] = {}   # ordered sets of repo-relative paths
         self.read_only: Dict[str, None] = {}
         self.history: List[dict] = []
-        self.undo_stack: List[Dict[str, Optional[str]]] = []
+        self.undo_stack: List[Dict[str, Optional[bytes]]] = []  # exact bytes, None = new file
+        self._undo_owner: Optional[dict] = None  # the `changed` dict of the newest step
         self.last_diffs: List[str] = []
         self.last_checks = CheckFacts()
         self.repo_map = RepoMap(self.root) if cfg.use_map else None
@@ -290,6 +300,11 @@ class Coder:
                 refused = redact.check_file(self.root, rel)
                 if refused:
                     console.print(f"[red]{refused}[/red]")
+                    continue
+                why = None if read_only else textfile.problem(self.root / rel)
+                if why:
+                    console.print(f"[red]{safe_markup(cannot_edit(rel, why))}[/red] "
+                                  "[dim]Use /read to add it read-only.[/dim]")
                     continue
                 self.editable.pop(rel, None)
                 self.read_only.pop(rel, None)
@@ -490,6 +505,11 @@ class Coder:
             errors = self._apply(blocks, changed) + problems
             if not errors:
                 break
+            if all(isinstance(e, Refusal) for e in errors):
+                # Nothing to fix, but the model must not think it edited those files
+                self.history.append({"role": "user", "content": "\n".join(errors)})
+                self.history.append({"role": "assistant", "content": "Ok, those files are unchanged."})
+                break
             if attempt == self.cfg.max_reflections:
                 console.print("[red]Some edits still failed; giving up on them.[/red]")
                 break
@@ -528,12 +548,18 @@ class Coder:
     def _single_file(self) -> Optional[str]:
         return next(iter(self.editable)) if len(self.editable) == 1 else None
 
-    def _save_undo(self, step: Dict[str, Optional[str]], rel: str, old: Optional[str]) -> None:
+    def _save_undo(self, changed: Dict[str, Optional[str]], rel: str, old: Optional[str]) -> None:
         """Call before each write, so an edit can be undone however its command ends.
-        A step keeps the first version of each file and is on the stack only once."""
-        step.setdefault(rel, old)
-        if not self.undo_stack or self.undo_stack[-1] is not step:
-            self.undo_stack.append(step)
+        `changed` gets the old text, for diffs. The undo step gets the old bytes, as
+        text can't restore line endings. One command (one `changed`) is one step."""
+        if self._undo_owner is not changed or not self.undo_stack:
+            self.undo_stack.append({})
+            self._undo_owner = changed
+        step = self.undo_stack[-1]
+        if rel not in step:
+            path = self.root / rel
+            step[rel] = path.read_bytes() if path.exists() else None
+        changed.setdefault(rel, old)
 
     def _apply(self, blocks, changed: Dict[str, Optional[str]],
                undo_step: Optional[Dict[str, Optional[str]]] = None) -> List[str]:
@@ -548,6 +574,11 @@ class Coder:
                 errors.append(f"Edit for {b.path} rejected: {e}")
                 continue
             path = self.root / rel
+            try:
+                old = textfile.read(path) if path.exists() else None
+            except textfile.NotEditable as e:
+                errors.append(self._refuse(rel, str(e)))
+                continue
             if rel not in self.editable:
                 if path.exists():
                     if self.cfg.auto_approve or Confirm.ask(
@@ -563,20 +594,29 @@ class Coder:
                 else:
                     errors.append(f"Edit for {rel} failed: that file does not exist.")
                     continue
-            old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
             try:
                 new = apply_edit(old or "", b.search, b.replace)
             except EditError as e:
                 errors.append(f"SEARCH/REPLACE block for {rel} failed.\n{e}\n\nThe failed block was:\n"
                               f"<<<<<<< SEARCH\n{b.search}=======\n{b.replace}>>>>>>> REPLACE")
                 continue
+            try:
+                data = textfile.encode(path, new)
+            except textfile.NotEditable as e:
+                errors.append(self._refuse(rel, str(e)))
+                continue
             changed.setdefault(rel, old)
             self._save_undo(step, rel, old)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(new, encoding="utf-8")
+            path.write_bytes(data)
             if rel not in self.editable:
                 self.editable[rel] = None
         return errors
+
+    def _refuse(self, rel: str, why: str) -> Refusal:
+        message = cannot_edit(rel, why)
+        console.print(f"[red]{safe_markup(message)}[/red]")
+        return Refusal(message)
 
     def _display(self, text: str) -> None:
         """Show prose as markdown and edit blocks as compact syntax-highlighted code."""
@@ -631,7 +671,8 @@ class Coder:
         console.print(f"[cyan]The model mentioned: {', '.join(found[:6])}[/cyan]")
         if Confirm.ask("Add these files to the chat?", default=True):
             self.add(found[:6])
-            if not applied and Confirm.ask("Re-send your request with these files?", default=True):
+            if (not applied and any(f in self.editable for f in found[:6])
+                    and Confirm.ask("Re-send your request with these files?", default=True)):
                 self.history = self.history[:-2] if len(self.history) >= 2 else []
                 self.send(user_text, _resend=True)
 
@@ -1007,6 +1048,10 @@ class Coder:
         t_path = test_file_path(self.root, mod_path, rel, class_name)
         existing_test = t_path if (self.root / t_path).is_file() else None
         console.print(f"[dim]Test file: {t_path}[/dim]")
+        why = textfile.problem(self.root / t_path)
+        if why:
+            self._refuse(t_path, why)
+            return
 
         # Style examples and helpers
         examples = find_test_examples(
@@ -1336,6 +1381,11 @@ class Coder:
             if refused:
                 console.print(f"[red]{refused}[/red]")
                 kt_files.remove(rel)
+                continue
+            why = textfile.problem(self.root / rel)
+            if why:
+                self._refuse(rel, why)
+                kt_files.remove(rel)
         if not kt_files:
             return
 
@@ -1419,6 +1469,7 @@ class Coder:
                 batch_update = update_mode and all(d.has_kdoc for d in batch)
 
                 # Save original for guardrail
+                current_bytes = path.read_bytes()
                 current_source = path.read_text(encoding="utf-8", errors="replace")
 
                 messages = build_doc_messages(
@@ -1441,10 +1492,14 @@ class Coder:
                     # that only comments changed, so this stays safe.
                     whole = extract_code_block(text)
                     if whole is not None and whole.strip():
+                        try:
+                            data = textfile.encode(path, whole if whole.endswith("\n") else whole + "\n")
+                        except textfile.NotEditable as e:
+                            self._refuse(rel, str(e))
+                            continue
                         batch_changed[rel] = current_source
                         self._save_undo(all_changed, rel, current_source)
-                        path.write_text(whole if whole.endswith("\n") else whole + "\n",
-                                        encoding="utf-8")
+                        path.write_bytes(data)
                     else:
                         console.print(f"[yellow]The model did not return usable edits for {rel} "
                                        f"(no SEARCH/REPLACE blocks and no single code block). "
@@ -1485,13 +1540,13 @@ class Coder:
                 written = path.read_text(encoding="utf-8", errors="replace")
                 reindented = reindent_kdoc_blocks(written)
                 if reindented != written:
-                    path.write_text(reindented, encoding="utf-8")
+                    path.write_bytes(textfile.encode(path, reindented))
                 new_source = path.read_text(encoding="utf-8", errors="replace")
                 diff_line = verify_code_unchanged(current_source, new_source)
                 if diff_line is not None:
                     console.print(f"[red]Code change detected at line {diff_line} in {rel}. "
                                    f"Reverting batch.[/red]")
-                    path.write_text(current_source, encoding="utf-8")
+                    path.write_bytes(current_bytes)
                     code_verified = False
                     continue
 
@@ -1500,7 +1555,7 @@ class Coder:
                 if unmatched is not None:
                     console.print(f"[red]Unmatched /** at line {unmatched} in {rel}. "
                                    f"Reverting batch.[/red]")
-                    path.write_text(current_source, encoding="utf-8")
+                    path.write_bytes(current_bytes)
                     code_verified = False
                     continue
 
@@ -1546,7 +1601,7 @@ class Coder:
                 self.editable.pop(rel, None)
                 console.print(f"[dim]Removed new file {rel}[/dim]")
             else:
-                path.write_text(old, encoding="utf-8")
+                path.write_bytes(old)
                 console.print(f"[dim]Restored {rel}[/dim]")
         self.history.append({"role": "user", "content": "I undid your last edits; the files are back "
                              "to how they were before. Don't redo them unless I ask."})

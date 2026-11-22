@@ -20,9 +20,9 @@ from typing import Any, Dict, List, Optional
 
 import typer
 
-from . import redact
+from . import redact, textfile
 from .config import Config, UNLIMITED_CHARS, parse_context_chars
-from .coder import Coder
+from .coder import Coder, cannot_edit
 from .checks import builtin_lint, custom_lint, ext_lint_cmd, run_tests, truncate_output
 from .editblock import parse_edit_blocks, unified_diff
 from .llm import (
@@ -106,7 +106,9 @@ class WebCoder:
             **{f: "read-only" for f in self.coder.read_only},
         }
 
-    def add_files(self, patterns: List[str], read_only: bool = False) -> List[str]:
+    def add_files(self, patterns: List[str], read_only: bool = False,
+                  refused: Optional[List[str]] = None) -> List[str]:
+        """Returns the files added. Why others can't be edited goes into `refused`."""
         import glob as glob_mod
         added = []
         with self.lock:
@@ -121,6 +123,11 @@ class WebCoder:
                         continue
                     if redact.check_file(self.coder.root, rel):
                         continue  # keystores, keys, .agentignore: never sent
+                    why = None if read_only else textfile.problem(self.coder.root / rel)
+                    if why:
+                        if refused is not None:
+                            refused.append(f"{cannot_edit(rel, why)} Add it read-only instead.")
+                        continue
                     self.coder.editable.pop(rel, None)
                     self.coder.read_only.pop(rel, None)
                     target[rel] = None
@@ -159,7 +166,7 @@ class WebCoder:
                     if path.exists():
                         path.unlink()
                 else:
-                    path.write_text(old_content, encoding="utf-8")
+                    path.write_bytes(old_content)
                 reverted.append(rel)
             self.coder._all_files = None
         return reverted
@@ -245,6 +252,11 @@ class WebCoder:
                             errors.append(str(e))
                             continue
                         path = self.coder.root / rel
+                        try:
+                            old = textfile.read(path) if path.exists() else None
+                        except textfile.NotEditable as e:
+                            errors.append(cannot_edit(rel, str(e)))
+                            continue
                         if rel not in self.coder.editable:
                             if path.exists():
                                 self.coder.editable[rel] = None
@@ -253,15 +265,18 @@ class WebCoder:
                             else:
                                 errors.append(f"Edit for {rel} failed: file not in chat.")
                                 continue
-                        old = path.read_text(encoding="utf-8", errors="replace") if path.exists() else None
                         try:
                             new = apply_edit(old or "", b.search, b.replace)
+                            data = textfile.encode(path, new)
                         except EditError as e:
                             errors.append(str(e))
                             continue
-                        changed.setdefault(rel, old)
+                        except textfile.NotEditable as e:
+                            errors.append(cannot_edit(rel, str(e)))
+                            continue
+                        self.coder._save_undo(changed, rel, old)
                         path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_text(new, encoding="utf-8")
+                        path.write_bytes(data)
                         if rel not in self.coder.editable:
                             self.coder.editable[rel] = None
 
@@ -273,7 +288,6 @@ class WebCoder:
                             diffs.append({"file": rel, "diff": d})
 
                     if changed:
-                        self.coder.undo_stack.append(changed)
                         self.coder._all_files = None
 
                 if errors:
@@ -555,11 +569,13 @@ class Handler(BaseHTTPRequestHandler):
             self._handle_chat()
         elif path == "/api/add":
             data = _read_json_body(self)
+            refused: List[str] = []
             added = self.web_coder.add_files(
                 data.get("files", []),
                 read_only=data.get("read_only", False),
+                refused=refused,
             )
-            _json_response(self, {"added": added})
+            _json_response(self, {"added": added, "refused": refused})
         elif path == "/api/drop":
             data = _read_json_body(self)
             dropped = self.web_coder.drop_files(data.get("files", []))
