@@ -9,6 +9,7 @@ from .config import Config
 from .input_reader import read_message, set_completer, was_erased
 from .mentions import expand as expand_mentions
 from .llm import list_models, switch_model
+from . import redact
 from .notes import find_notes, load_notes, notes_exist, gather_init_info, INIT_PROMPT
 from .review import collect_material, build_review_messages, build_merge_messages, needs_split, split_material_by_file, split_material_by_commit
 from .skills import load_skills, select_skills, format_skill_context, list_skills_display
@@ -26,6 +27,9 @@ def app() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "graph":
         from .graph.cli import run as run_graph
         sys.exit(run_graph(sys.argv[2:]))
+    if len(sys.argv) > 1 and sys.argv[1] == "scan":
+        from .redact import scan_main
+        sys.exit(scan_main(sys.argv[2:]))
     cli()
 
 
@@ -47,6 +51,7 @@ def main(
         cfg.model = model
     if base_url:
         cfg.base_url = base_url
+    redact.set_reporter(redact.rich_reporter(console))
     if check:
         try:
             models = list_models(cfg)
@@ -66,6 +71,7 @@ def main(
         console.print(rm.render(query=show_map, budget=cfg.map_chars), markup=False, highlight=False)
         return
 
+    redact.startup_notice(cfg)
     if init_notes:
         _do_init_notes(cfg)
         return

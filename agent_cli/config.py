@@ -92,7 +92,8 @@ class Config:
     debug: bool = os.getenv("AGENT_DEBUG", "") not in ("", "0", "false")
     # Append every outgoing HTTP request and incoming reply to this file.
     # Quieter than AGENT_DEBUG (which prints to the console); the Authorization
-    # bearer token is redacted. Empty = off.
+    # bearer token is redacted and message contents are already masked by
+    # redact.py (placeholders, not real secrets). Empty = off.
     http_log: str = os.getenv("AGENT_HTTP_LOG", "")
     # vLLM: keep special tokens such as <tool_call> in the output. Qwen's tool-call
     # markup is made of special tokens, which vLLM strips by default, so the

@@ -748,6 +748,9 @@ def _collect_kdoc_samples(
             for name in filenames:
                 if not name.endswith(exts):
                     continue
+                from . import redact
+                if redact.get(root).file_policy(Path(dirpath, name), sniff=False).action == "block":
+                    continue  # .agentignore'd: not even as a style sample
                 try:
                     text = Path(dirpath, name).read_text(encoding="utf-8", errors="replace")
                 except OSError:

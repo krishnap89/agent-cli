@@ -55,6 +55,11 @@ def expand(text: str, root: Path) -> Tuple[str, List[str]]:
             if resolved.is_dir():
                 notes.append(f"{rel}: is a directory, not attached")
                 continue
+            from . import redact
+            refused = redact.check_file(root, resolved)
+            if refused:
+                notes.append(f"{refused} Not attached")
+                continue
             content = resolved.read_text(encoding="utf-8", errors="replace")
         except OSError as e:
             notes.append(f"{rel}: could not read ({e}), not attached")

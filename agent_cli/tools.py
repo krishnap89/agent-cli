@@ -5,6 +5,7 @@ from pathlib import Path
 from rich.console import Console
 from rich.prompt import Confirm
 
+from . import redact
 from .config import Config
 from .repomap import RepoMap
 
@@ -234,6 +235,15 @@ class Tools:
             raise ToolError(f"Path escapes working directory: {path}")
         return p
 
+    def _resolve_sendable(self, path: str) -> Path:
+        """Like _resolve, but refuse files that must never reach the model
+        (keystores, private keys, .agentignore) and warn once for .env & co."""
+        p = self._resolve(path)
+        refused = redact.check_file(self.root, p)
+        if refused:
+            raise ToolError(refused)
+        return p
+
     def _confirm(self, action: str) -> bool:
         if self.cfg.auto_approve:
             return True
@@ -292,7 +302,7 @@ class Tools:
         return "\n".join(f"{e.name}/" if e.is_dir() else e.name for e in entries) or "(empty)"
 
     def t_read_file(self, path: str, start_line: int = None, end_line: int = None) -> str:
-        lines = self._resolve(path).read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = self._resolve_sendable(path).read_text(encoding="utf-8", errors="replace").splitlines()
         total = len(lines)
         max_lines = 400
         start = max(int(start_line or 1), 1)
@@ -320,7 +330,7 @@ class Tools:
         return self.ensure_map().outline(rel)
 
     def t_write_file(self, path: str, content: str) -> str:
-        p = self._resolve(path)
+        p = self._resolve_sendable(path)
         old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
         self._show_diff(path, old, content)
         if not self._confirm(f"write {path} ({len(content)} chars)"):
@@ -330,7 +340,7 @@ class Tools:
         return f"Wrote {path}"
 
     def t_edit_file(self, path: str, old_str: str, new_str: str) -> str:
-        p = self._resolve(path)
+        p = self._resolve_sendable(path)
         text = p.read_text(encoding="utf-8")
         count = text.count(old_str)
         if count != 1:
@@ -357,7 +367,7 @@ class Tools:
             old_str = e.get("old_str", "")
             if not path or new_str is None:
                 raise ToolError(f"edit #{i + 1} needs 'path' and 'new_str'.")
-            p = self._resolve(path)
+            p = self._resolve_sendable(path)
             if p not in pending:
                 if p.exists():
                     originals[p] = pending[p] = p.read_text(encoding="utf-8")
@@ -449,11 +459,17 @@ class Tools:
             return f"Search error: {r.stderr.strip()[:300]}.{hint}"
 
         hits = []
+        red = redact.get(self.root)
+        blocked = {}  # file -> bool, so each file's policy is computed once
         for line in r.stdout.splitlines():
             if line.startswith("./"):
                 line = line[2:]
             file = line.split(":", 1)[0]
-            if not any(part in SEARCH_SKIP_DIRS for part in file.split("/")):
+            if any(part in SEARCH_SKIP_DIRS for part in file.split("/")):
+                continue
+            if file not in blocked:
+                blocked[file] = red.file_policy(file).action == "block"
+            if not blocked[file]:
                 hits.append(line)
         file_matches = [] if regex else self._find_files(pattern, rel)
         if not hits:
@@ -520,6 +536,9 @@ class Tools:
         return self._render_todos()
 
     def t_run_command(self, command: str) -> str:
+        refused = self._blocked_in_command(command)
+        if refused:
+            raise ToolError(refused + " Run the command yourself if you need it.")
         if not self._confirm(f"run `{command}`"):
             return "User denied the command."
         try:
@@ -529,7 +548,32 @@ class Tools:
             )
         except subprocess.TimeoutExpired:
             return "Command timed out after 120s."
-        return f"exit code: {r.returncode}\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+        out = f"exit code: {r.returncode}\n--- stdout ---\n{r.stdout}\n--- stderr ---\n{r.stderr}"
+        redact.note_untrusted(out, "log")
+        return out
+
+    def _blocked_in_command(self, command: str):
+        """A refusal if the command names a blocked file (`cat release.jks`,
+        `head secrets/x.key`): its output would carry the file's content."""
+        import shlex
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
+        red = redact.get(self.root)
+        for tok in tokens:
+            tok = tok.split("=", 1)[-1] if tok.startswith("-") else tok
+            if not tok or tok.startswith("-"):
+                continue
+            try:
+                p = (self.root / tok).resolve()
+            except (OSError, ValueError):
+                continue
+            if p.is_file() and p.is_relative_to(self.root):
+                refused = red.check_file(p)
+                if refused:
+                    return refused
+        return None
 
     # ---- Jira (read-only) ---------------------------------------------------
 
@@ -539,7 +583,9 @@ class Tools:
             return ("Jira is not configured. Set AGENT_JIRA_URL, AGENT_JIRA_EMAIL "
                     "and AGENT_JIRA_TOKEN.")
         try:
-            return jira.get_issue(self.cfg, key)
+            out = jira.get_issue(self.cfg, key)
+            redact.note_untrusted(out, "jira")
+            return out
         except jira.JiraError as e:
             return f"Jira error: {e}"
 
@@ -549,6 +595,8 @@ class Tools:
             return ("Jira is not configured. Set AGENT_JIRA_URL, AGENT_JIRA_EMAIL "
                     "and AGENT_JIRA_TOKEN.")
         try:
-            return jira.search_issues(self.cfg, jql, max_results)
+            out = jira.search_issues(self.cfg, jql, max_results)
+            redact.note_untrusted(out, "jira")
+            return out
         except jira.JiraError as e:
             return f"Jira error: {e}"

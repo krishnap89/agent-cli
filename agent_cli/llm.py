@@ -6,6 +6,13 @@ Two features protect against 504 Gateway Timeout errors:
 - Streaming: the server sends the reply piece by piece, so proxies and load
   balancers in between see constant traffic and don't time out.
 - Retries: 502/503/504 and dropped connections are retried with a short wait.
+
+This module is also the single choke point for data masking (redact.py):
+every outgoing message is masked in `_masked` right before a request is built,
+and every reply (content, reasoning, tool-call arguments) is unmasked as it
+arrives, in `iter_stream_events` and `_parse_full`. Nothing else in the code
+talks to the model server, so callers never see placeholders and the server
+never sees the real values.
 """
 import json
 import re
@@ -15,6 +22,7 @@ import urllib.request
 from datetime import datetime
 from typing import Callable, List, Optional
 
+from . import redact
 from .config import Config
 
 RETRY_STATUS = {429, 502, 503, 504}
@@ -121,10 +129,13 @@ def chat(
     temperature: Optional[float] = None,
 ) -> Reply:
     """POST to {base_url}/chat/completions and return the reply, retrying on gateway errors."""
+    messages, counts = _masked(cfg, messages)
     attempts = cfg.retries + 1
     for attempt in range(1, attempts + 1):
         try:
-            return _chat_once(cfg, messages, stop, on_progress, temperature)
+            reply = _chat_once(cfg, messages, stop, on_progress, temperature)
+            redact.report_counts(counts)
+            return reply
         except _Retryable as e:
             if attempt == attempts:
                 raise LLMError(f"{e} (gave up after {attempts} attempts)") from e
@@ -133,6 +144,17 @@ def chat(
                 on_retry(str(e), attempt, wait)
             time.sleep(wait)
     raise LLMError("unreachable")
+
+
+def _masked(cfg: Config, messages: list):
+    """Mask every outgoing message. The ONLY way messages reach the server.
+
+    Runs the strict-mode PII pass first (if on) so values it finds are masked
+    in this very request. Returns (masked_messages, {kind: count}).
+    """
+    red = redact.for_config(cfg)
+    red.run_strict(cfg)
+    return red.mask_messages(messages)
 
 
 def _chat_once(cfg: Config, messages: list, stop, on_progress: ProgressFn,
@@ -178,7 +200,23 @@ def iter_stream_events(cfg: Config, resp):
 
     The response is lines like 'data: {json}' ending with 'data: [DONE]'.
     Shared by llm.chat and web.py so the SSE wire format lives in one place.
+    Placeholders are unmasked here, delta by delta: a trailing partial
+    "[REDACTED_..." is held back until the next delta completes it.
     """
+    red = redact.for_config(cfg)
+    text_un = {"content": redact.StreamUnmasker(red), "thinking": redact.StreamUnmasker(red)}
+    tool_un = {}  # index -> StreamUnmasker (JSON-escaping: arguments are JSON text)
+
+    def flush():
+        for kind, un in text_un.items():
+            rest = un.flush()
+            if rest:
+                yield (kind, rest)
+        for index, un in tool_un.items():
+            rest = un.flush()
+            if rest:
+                yield ("tool", (index, None, rest))
+
     for raw in resp:
         line = raw.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
@@ -198,15 +236,27 @@ def iter_stream_events(cfg: Config, resp):
         for choice in chunk.get("choices", []):
             delta = choice.get("delta") or {}
             if delta.get("content"):
-                yield ("content", delta["content"])
+                piece = text_un["content"].feed(delta["content"])
+                if piece:
+                    yield ("content", piece)
             think = delta.get("reasoning_content") or delta.get("reasoning")
             if think:
-                yield ("thinking", think)
+                piece = text_un["thinking"].feed(think)
+                if piece:
+                    yield ("thinking", piece)
             for tc in delta.get("tool_calls") or []:
                 fn = tc.get("function") or {}
-                yield ("tool", (tc.get("index"), fn.get("name"), fn.get("arguments")))
+                args = fn.get("arguments")
+                index = tc.get("index")
+                if isinstance(args, str):
+                    args = tool_un.setdefault(index, redact.StreamUnmasker(red, json_mode=True)).feed(args)
+                elif args is not None:
+                    args = red.unmask_arguments(args)
+                yield ("tool", (index, fn.get("name"), args))
             if choice.get("finish_reason"):
+                yield from flush()
                 yield ("finish", choice["finish_reason"])
+    yield from flush()
 
 
 def _read_stream(cfg: Config, resp, on_progress: ProgressFn) -> Reply:
@@ -246,15 +296,17 @@ def _parse_full(cfg: Config, data: dict) -> Reply:
     log_http(cfg, "REPLY", json.dumps(data, indent=2))
     if cfg.debug:
         print("\n----- RAW RESPONSE -----\n" + json.dumps(data, indent=2)[:4000] + "\n------------------------\n")
+    red = redact.for_config(cfg)
     try:
         choice = data["choices"][0]
         msg = choice["message"]
         return Reply(
-            content=msg.get("content") or "",
+            content=red.unmask_text(msg.get("content") or ""),
             finish_reason=choice.get("finish_reason") or "",
-            reasoning=msg.get("reasoning_content") or msg.get("reasoning") or "",
+            reasoning=red.unmask_text(msg.get("reasoning_content") or msg.get("reasoning") or ""),
             tool_calls=[{"name": (tc.get("function") or {}).get("name", ""),
-                         "arguments": (tc.get("function") or {}).get("arguments", "")}
+                         "arguments": red.unmask_arguments(
+                             (tc.get("function") or {}).get("arguments", ""))}
                         for tc in msg.get("tool_calls") or []],
         )
     except (KeyError, IndexError, TypeError) as e:
@@ -268,6 +320,8 @@ def open_stream(cfg: Config, messages: list, temperature: Optional[float] = None
     cancellation between chunks iterate the events themselves (see web.py).
     """
     url = cfg.base_url.rstrip("/") + "/chat/completions"
+    messages, counts = _masked(cfg, messages)
+    redact.report_counts(counts)
     payload = build_payload(cfg, messages, stream=True, temperature=temperature)
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers=_headers(cfg), method="POST"

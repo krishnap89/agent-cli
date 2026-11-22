@@ -646,6 +646,13 @@ class RepoMap:
     # -- indexing --
 
     def list_files(self) -> List[str]:
+        """Indexable source files, minus any the redact policy blocks
+        (.agentignore): their symbols never reach the model either."""
+        from . import redact
+        red = redact.get(self.root)
+        return [f for f in self._list_files() if red.file_policy(f, sniff=False).action != "block"]
+
+    def _list_files(self) -> List[str]:
         exts = set(LANG_PATTERNS) | {".py"}
         try:
             out = subprocess.run(

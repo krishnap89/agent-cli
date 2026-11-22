@@ -23,6 +23,7 @@ from typing import Callable, Dict, List, Optional
 
 from rich.console import Console
 
+from .. import redact
 from ..editblock import unified_diff
 from .checker import Checker, CheckResult
 from .modelpick import model_for
@@ -63,6 +64,7 @@ class RunLogger:
     """Append one JSON line per role call to .agent-cache/runs/<timestamp>.jsonl."""
 
     def __init__(self, root: Path):
+        self.root = root
         ts = time.strftime("%Y%m%d-%H%M%S")
         self.path = root / ".agent-cache" / "runs" / f"{ts}.jsonl"
         self._ok = True
@@ -74,11 +76,13 @@ class RunLogger:
     def log(self, role: str, input_text: str, output: str, duration: float, extra: Optional[dict] = None) -> None:
         if not self._ok:
             return
+        # Replies are unmasked by the time they get here: mask them again so
+        # real secret/personal values never land in the run log on disk.
         rec = {
             "t": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "role": role,
             "input_chars": len(input_text or ""),
-            "output": (output or "")[:4000],
+            "output": redact.mask_for_log(self.root, output or "")[:4000],
             "duration_s": round(duration, 3),
         }
         if extra:

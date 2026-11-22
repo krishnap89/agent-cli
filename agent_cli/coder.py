@@ -37,6 +37,7 @@ from .editblock import EditBlock, EditError, HEAD_RE, UPDATED_RE, apply_edit, pa
 from .input_reader import read_message, set_completer
 from .intent import route as route_intent
 from .llm import LLMError, chat, list_models, switch_model
+from . import redact
 from .repomap import RepoMap
 from .testgen import (
     resolve_target, detect_test_setup, classify_class, check_required_libs,
@@ -275,6 +276,10 @@ class Coder:
                 except ValueError as e:
                     console.print(f"[red]{e}[/red]")
                     continue
+                refused = redact.check_file(self.root, rel)
+                if refused:
+                    console.print(f"[red]{refused}[/red]")
+                    continue
                 self.editable.pop(rel, None)
                 self.read_only.pop(rel, None)
                 target[rel] = None
@@ -306,6 +311,9 @@ class Coder:
             console.print(f"  {f} [dim](read-only)[/dim]")
 
     def _file_block(self, rel: str) -> str:
+        refused = redact.check_file(self.root, rel)
+        if refused:
+            return f"{rel}\n({refused})\n"
         try:
             text = (self.root / rel).read_text(encoding="utf-8", errors="replace")
         except OSError as e:
@@ -723,6 +731,7 @@ class Coder:
                         changed: Dict[str, Optional[str]], user_text: str) -> bool:
         """Send check errors to model for fixing. Returns True if model replied with edits."""
         truncated = truncate_output(error_text, self.cfg.check_output_chars)
+        redact.note_untrusted(truncated, "log")
         feedback = (f"Your edits were applied, but {what} failed:\n\n{truncated}\n\n"
                     "Fix the problem with SEARCH/REPLACE blocks. The files in the chat "
                     "show their current contents, including your previous edits.")
@@ -965,6 +974,8 @@ class Coder:
                 repo_map_files, self.cfg.context_chars,
             )
             for src in extra_sources:
+                if redact.check_file(self.root, src):
+                    continue  # refused when it was added
                 try:
                     text = (self.root / src).read_text(encoding="utf-8", errors="replace")
                 except OSError:
@@ -1008,6 +1019,11 @@ class Coder:
                 return
             # A path to a source file: add it to context, drop it from unknowns,
             # and regenerate the plan so the model plans against the real type.
+            refused = redact.check_file(self.root, choice) if choice and \
+                _looks_like_source_path(choice) and (self.root / choice).is_file() else None
+            if refused:
+                console.print(f"[red]{refused}[/red]")
+                choice = ""
             if choice and _looks_like_source_path(choice) and (self.root / choice).is_file():
                 extra_sources.append(choice)
                 ctx, unknown_types = build_ctx()
@@ -1248,6 +1264,13 @@ class Coder:
             kt_files = resolve_doc_target(self.root, target, repo_map_files)
         except ValueError as e:
             console.print(f"[yellow]{e}[/yellow]")
+            return
+        for rel in list(kt_files):
+            refused = redact.check_file(self.root, rel)
+            if refused:
+                console.print(f"[red]{refused}[/red]")
+                kt_files.remove(rel)
+        if not kt_files:
             return
 
         if len(kt_files) > 10:
@@ -1533,6 +1556,7 @@ class Coder:
         console.print(f"[dim]{status}[/dim]")
         if output and Confirm.ask("Add the output to the chat?", default=failed):
             text = output if len(output) < 8000 else "...(truncated)...\n" + output[-8000:]
+            redact.note_untrusted(text, "log")
             self.history.append({"role": "user", "content": f"I ran `{command}` ({status}):\n```\n{text}\n```"})
             self.history.append({"role": "assistant", "content": "Ok, I've seen the output."})
             console.print("[dim]Added. Now ask, e.g. 'fix the failing test'.[/dim]")
@@ -1565,6 +1589,8 @@ def main(
         cfg.model = model
     if base_url:
         cfg.base_url = base_url
+    redact.set_reporter(redact.rich_reporter(console))
+    redact.startup_notice(cfg)
     if init_notes:
         _do_init_notes(cfg)
         return
