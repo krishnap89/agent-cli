@@ -313,8 +313,12 @@ def _parse_full(cfg: Config, data: dict) -> Reply:
         raise LLMError(f"Unexpected response shape: {json.dumps(data)[:500]}") from e
 
 
-def open_stream(cfg: Config, messages: list, temperature: Optional[float] = None):
-    """Open a streaming /chat/completions request. Returns the urlopen context manager.
+def open_stream(cfg: Config, messages: list, temperature: Optional[float] = None,
+                stop: Optional[List[str]] = None, stream: bool = True,
+                on_request: Optional[Callable[[dict], None]] = None):
+    """Open a /chat/completions request. Returns the urlopen context manager.
+
+    Streams unless stream=False. on_request gets the masked body just before it is sent.
 
     Use with `iter_stream_events` to consume deltas. Callers that need
     cancellation between chunks iterate the events themselves (see web.py).
@@ -322,7 +326,9 @@ def open_stream(cfg: Config, messages: list, temperature: Optional[float] = None
     url = cfg.base_url.rstrip("/") + "/chat/completions"
     messages, counts = _masked(cfg, messages)
     redact.report_counts(counts)
-    payload = build_payload(cfg, messages, stream=True, temperature=temperature)
+    payload = build_payload(cfg, messages, stop=stop, stream=stream, temperature=temperature)
+    if on_request:
+        on_request(payload)
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode(), headers=_headers(cfg), method="POST"
     )
