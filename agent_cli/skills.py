@@ -1,5 +1,11 @@
 """Skills: loadable instruction sets from .agent/skills/<name>/SKILL.md.
 
+Skills are read from two folders:
+  1. <workdir>/.agent/skills          project skills
+  2. ~/.config/agent-cli/skills       global skills, used in every folder
+     (override with AGENT_GLOBAL_SKILLS_DIR; set it empty to turn off)
+A project skill replaces a global skill with the same name.
+
 Each SKILL.md has YAML-like front matter (parsed by hand, no pyyaml):
   ---
   name: skill-name
@@ -14,6 +20,7 @@ Skills are scored against user messages by counting trigger word matches
 (the description is for humans, not matching).  The top 1–2 (score > 0) are
 injected as context.
 """
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -26,6 +33,15 @@ console = Console()
 SKILLS_DIR = ".agent/skills"
 
 
+def global_skills_dir() -> Optional[Path]:
+    """The global skills folder, or None when AGENT_GLOBAL_SKILLS_DIR is set empty."""
+    value = os.getenv("AGENT_GLOBAL_SKILLS_DIR")
+    if value is None:
+        return Path.home() / ".config" / "agent-cli" / "skills"
+    value = value.strip()
+    return Path(value).expanduser() if value else None
+
+
 @dataclass
 class Skill:
     name: str
@@ -33,6 +49,7 @@ class Skill:
     triggers: List[str]
     body: str
     path: Path
+    is_global: bool = False
 
     def truncated(self, budget: int) -> str:
         if len(self.body) <= budget:
@@ -109,18 +126,47 @@ def load_skill(skill_dir: Path) -> Optional[Skill]:
                  body=body.strip(), path=md)
 
 
-def load_skills(workdir: Path) -> List[Skill]:
-    """Load all skills from <workdir>/.agent/skills/*/SKILL.md."""
-    skills_root = workdir / SKILLS_DIR
+def _load_skills_from(skills_root: Path) -> List[Skill]:
+    """Load every <skills_root>/*/SKILL.md, sorted by folder name."""
     if not skills_root.is_dir():
         return []
     loaded = []
-    for entry in sorted(skills_root.iterdir()):
+    try:
+        entries = sorted(skills_root.iterdir())
+    except OSError:
+        return []
+    for entry in entries:
         if entry.is_dir():
             skill = load_skill(entry)
             if skill is not None:
                 loaded.append(skill)
     return loaded
+
+
+def load_skills(workdir: Path) -> List[Skill]:
+    """Load project skills from <workdir>/.agent/skills plus global skills.
+
+    A project skill replaces a global skill with the same name.  When the
+    project folder is the global folder itself, skills are loaded once.
+    """
+    project_root = workdir / SKILLS_DIR
+    project = _load_skills_from(project_root)
+    global_root = global_skills_dir()
+    if global_root is None:
+        return project
+    try:
+        same = global_root.resolve() == project_root.resolve()
+    except OSError:
+        same = False
+    if same:
+        return project
+    names = {s.name for s in project}
+    extra = []
+    for skill in _load_skills_from(global_root):
+        if skill.name not in names:
+            skill.is_global = True
+            extra.append(skill)
+    return project + extra
 
 
 def _tokenise(text: str) -> List[str]:
@@ -167,10 +213,12 @@ def format_skill_context(skill: Skill, budget: int) -> str:
 def list_skills_display(skills: List[Skill]) -> str:
     """Format the skill list for /skills command."""
     if not skills:
-        return "No skills loaded. Create .agent/skills/<name>/SKILL.md to add one."
+        return ("No skills loaded. Create .agent/skills/<name>/SKILL.md (this folder) "
+                "or ~/.config/agent-cli/skills/<name>/SKILL.md (every folder) to add one.")
     lines = []
     for s in skills:
         triggers = ", ".join(s.triggers[:5]) if s.triggers else "(none)"
-        lines.append(f"  {s.name:20s} {s.description or '(no description)'}")
+        where = " (global)" if s.is_global else ""
+        lines.append(f"  {s.name:20s} {s.description or '(no description)'}{where}")
         lines.append(f"  {'':20s} triggers: {triggers}")
     return "\n".join(lines)
