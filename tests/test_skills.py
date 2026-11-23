@@ -2,6 +2,7 @@
 import os
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from agent_cli.config import Config
@@ -126,6 +127,59 @@ class TestLoadSkills(unittest.TestCase):
         (self.root / ".agent" / "skills" / "bad").mkdir(parents=True)
         skills = load_skills(self.root)
         self.assertEqual(len(skills), 1)
+
+
+class TestGlobalSkills(unittest.TestCase):
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.project = Path(self.td.name) / "project"
+        self.project.mkdir()
+        self.global_root = Path(self.td.name) / "global"
+        self.env = unittest.mock.patch.dict(
+            os.environ, {"AGENT_GLOBAL_SKILLS_DIR": str(self.global_root)})
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.td.cleanup()
+
+    def _global_skill(self, name: str, content: str) -> None:
+        d = self.global_root / name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(content)
+
+    def test_global_skills_load_without_project_skills(self):
+        self._global_skill("kotlin", SAMPLE_SKILL)
+        skills = load_skills(self.project)
+        self.assertEqual([s.name for s in skills], ["kotlin-style"])
+        self.assertTrue(skills[0].is_global)
+        self.assertIn("(global)", list_skills_display(skills))
+
+    def test_project_and_global_are_combined(self):
+        self._global_skill("testing", SAMPLE_SKILL_2)
+        _make_skill_dir(self.project, "kotlin", SAMPLE_SKILL)
+        skills = load_skills(self.project)
+        self.assertEqual([(s.name, s.is_global) for s in skills],
+                         [("kotlin-style", False), ("testing", True)])
+
+    def test_project_skill_replaces_global_with_same_name(self):
+        self._global_skill("kotlin", SAMPLE_SKILL)
+        _make_skill_dir(self.project, "kotlin", SAMPLE_SKILL.replace("camelCase", "PROJECT"))
+        skills = load_skills(self.project)
+        self.assertEqual(len(skills), 1)
+        self.assertFalse(skills[0].is_global)
+        self.assertIn("PROJECT", skills[0].body)
+
+    def test_empty_env_turns_global_off(self):
+        self._global_skill("kotlin", SAMPLE_SKILL)
+        with unittest.mock.patch.dict(os.environ, {"AGENT_GLOBAL_SKILLS_DIR": ""}):
+            self.assertEqual(load_skills(self.project), [])
+
+    def test_global_folder_inside_project_loads_once(self):
+        _make_skill_dir(self.project, "kotlin", SAMPLE_SKILL)
+        with unittest.mock.patch.dict(
+                os.environ, {"AGENT_GLOBAL_SKILLS_DIR": str(self.project / ".agent" / "skills")}):
+            self.assertEqual(len(load_skills(self.project)), 1)
 
 
 class TestScoring(unittest.TestCase):

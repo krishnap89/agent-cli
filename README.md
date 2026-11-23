@@ -495,6 +495,12 @@ Skills are reusable instruction sets that live in your project at
     ---
     Your markdown instructions here.
 
+Skills you want in every folder go in `~/.config/agent-cli/skills/<name>/SKILL.md`
+(the same layout). Both folders are read; a project skill replaces a global
+skill with the same name, and `/skills` marks global ones with "(global)".
+Set AGENT_GLOBAL_SKILLS_DIR to use another global folder, or set it empty to
+turn global skills off.
+
 Skills are loaded at startup in both `agent` and `coder`. For each user
 message, the top 1–2 skills whose trigger/description words match are
 auto-selected and injected as context (the model doesn't choose skills).
